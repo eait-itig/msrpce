@@ -26,16 +26,41 @@
 
 -module(msrpce_compiler).
 
--export([encode_func_form/4, decode_func_form/4, compile_module/3]).
+-export([
+    new/0,
+    new/1,
+    set_options/2,
+    define_type/3,
+    compile_type/3,
+    func_forms/1
+    ]).
+-export_type([state/0]).
 
+-type loc() :: erl_syntax:annotation_or_location().
 -type options() :: #{
     endian => big | little
     }.
+-type type_options() :: options() | #{
+    location => loc()
+    }.
 
--type rpce_type() :: basic_type() | {struct, atom(), [field_spec()]}.
--type basic_type() :: uint8 | uint16 | uint32 | uint64 | int8 | int16 | int32 |
-    int64 | {fixed_array, integer(), rpce_type()} | {array, rpce_type()} |
-    {pointer, rpce_type()} | str | unicode | sid | filetime.
+-type type_name() :: atom().
+-type record_name() :: atom().
+-type rpce_type() :: basic_type() | struct_type() | custom_type() | type_name().
+-type custom_type() :: {custom, rpce_type(), expr(), expr()}.
+-type struct_type() :: {struct, record_name(), [field_spec()]}.
+-type array_type() :: {fixed_array, count(), rpce_type()} |
+    {conformant_array, rpce_type()} |
+    {varying_array, rpce_type()} |
+    {array, rpce_type()}.
+-type pointer_type() :: {pointer, rpce_type()}.
+-type string_type() :: unicode |
+    string | {fixed_string, bytes()} | varying_string |
+    binary | {fixed_binary, bytes()} | varying_binary |
+    {fixed_binary, Size :: bytes(), Alignment :: bytes()}.
+-type basic_type() :: int_type() | string_type() | array_type() | pointer_type().
+-type int_type() :: boolean | uint8 | uint16 | uint32 | uint64 | int8 | int16 |
+    int32 | int64.
 
 -type field_spec() :: {Field :: atom(), rpce_type()}.
 
@@ -44,84 +69,370 @@
 -type var() :: erl_syntax:syntaxTree().
 -type bytes() :: integer().
 -type bits() :: integer().
+-type count() :: integer().
+
+-type type_index() :: #{type_name() => rpce_type()}.
+-type type_path() :: [type_name()].
 
 -record(?MODULE, {
     opts = #{} :: options(),
-    offset = 0 :: integer(),
-    forms = [] :: [form()],
-    packforms = [] :: [form()], % struct packing forms, used in decode
-    defer = #{} :: #{atom() => {var(), rpce_type()}},
-        % on encode, the defer var() is the original value
-        % on decode, it's the variable we need to set before packforms
-    inum = #{} :: #{integer() => integer()}, % intermediate binaries at each nesting level
-    ilvl = 0 :: integer(), % intermediate nesting level
-    tnum = 0 :: integer(), % temporary
-    pnum = 0 :: integer(), % pointer map: value => ref
-    rnum = 0 :: integer(), % pointer map: ref => defer key
-    dnum = 0 :: integer(), % next defer id number
-    ectx = [] :: [expr()]
+    types = #{} :: type_index(),
+    funcs = [] :: [form()]
     }).
+
+-opaque state() :: #?MODULE{}.
+
+-spec new() -> state().
+new() -> new(#{}).
+
+-spec new(options()) -> state().
+new(Opts) ->
+    #?MODULE{opts = Opts}.
+
+-spec set_options(options(), state()) -> state().
+set_options(NewOpts, S0 = #?MODULE{opts = Opts0}) ->
+    Opts1 = maps:merge(Opts0, NewOpts),
+    S0#?MODULE{opts = Opts1}.
+
+-spec define_type(type_name(), rpce_type(), state()) -> {ok, state()} | {error, term()}.
+define_type(Name, Type, S0 = #?MODULE{types = T0}) ->
+    case T0 of
+        #{Name := _} ->
+            {error, {type_already_defined, Name}};
+        _ ->
+            T1 = T0#{Name => Type},
+            S1 = S0#?MODULE{types = T1},
+            {ok, S1}
+    end.
+
+-spec compile_type(type_name(), type_options(), state()) -> {ok, state()} | {error, term()}.
+compile_type(Name, TOpts, S0 = #?MODULE{types = T0, funcs = F0, opts = Opts}) ->
+    case T0 of
+        #{Name := Type0} ->
+            case resolve_typerefs(Type0, T0) of
+                {ok, Type1 = {struct, RecName, _}} ->
+                    L = maps:get(location, TOpts, 2),
+                    ToCompile = [{[], Type1} | get_deferred_types(Type1)],
+                    io:format("~p\n", [ToCompile]),
+                    F1 = lists:foldl(fun ({Path, FType}, Acc) ->
+                        EForm = encode_struct_func_form(Path, FType, L, Opts),
+                        DForm = decode_struct_func_form(Path, FType, L, Opts),
+                        FForm = decode_finish_func_form(Path, FType, L, Opts),
+                        [EForm, DForm, FForm | Acc]
+                    end, F0, ToCompile),
+                    EForm = encode_func_form(Type1, L),
+                    DForm = decode_func_form(Type1, L),
+                    F2 = [EForm, DForm | F1],
+                    {ok, S0#?MODULE{funcs = F2}};
+                {ok, Other} ->
+                    {error, {not_struct_type, Other}};
+                Err -> Err
+            end;
+        _ ->
+            {error, {undefined_type, Name}}
+    end.
+
+-spec func_forms(state()) -> [form()].
+func_forms(S0 = #?MODULE{funcs = F0}) ->
+    F0.
+
+-spec get_deferred_types(rpce_type()) -> [{type_path(), rpce_type()}].
+get_deferred_types(Type) -> get_deferred_types(Type, [], base).
+
+-spec get_deferred_types(rpce_type(), type_path(), atom()) -> [type_path()].
+get_deferred_types({custom, Base, _E, _D}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
+get_deferred_types({pointer, Type = {struct, RecName, Fields}}, Path0, _Name) ->
+    Path1 = Path0 ++ [RecName],
+    FieldTypes = lists:foldl(fun ({FName, FType}, Acc) ->
+        Acc ++ get_deferred_types(FType, Path1, FName)
+    end, [], Fields),
+    [{Path0, Type} | FieldTypes];
+get_deferred_types({pointer, Type}, Path0, Name) ->
+    Path1 = Path0 ++ [{scalar_field, Name}],
+    [{Path1, Type} | get_deferred_types(Type, Path0, Name)];
+get_deferred_types({struct, RecName, Fields}, Path0, _Name) ->
+    Path1 = Path0 ++ [RecName],
+    lists:foldl(fun ({FName, FType}, Acc) ->
+        Acc ++ get_deferred_types(FType, Path1, FName)
+    end, [], Fields);
+get_deferred_types({fixed_array, _N, SubType}, Path0, Name) ->
+    Path1 = Path0 ++ [{array_field, Name}],
+    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
+get_deferred_types({fixed_array, _N, SubType}, Path0, Name) ->
+    Path1 = Path0 ++ [{array_field, Name}],
+    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
+get_deferred_types({conformant_array, SubType}, Path0, Name) ->
+    Path1 = Path0 ++ [{array_field, Name}],
+    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
+get_deferred_types({varying_array, SubType}, Path0, Name) ->
+    Path1 = Path0 ++ [{array_field, Name}],
+    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
+get_deferred_types({array, SubType}, Path0, Name) ->
+    Path1 = Path0 ++ [{array_field, Name}],
+    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
+get_deferred_types(_, _, _) -> [].
+
+-spec resolve_typerefs(rpce_type(), type_index()) -> {ok, rpce_type()} | {error, term()}.
+resolve_typerefs(uint8, _) -> {ok, uint8};
+resolve_typerefs(boolean, _) -> {ok, boolean};
+resolve_typerefs(uint16, _) -> {ok, uint16};
+resolve_typerefs(uint32, _) -> {ok, uint32};
+resolve_typerefs(uint64, _) -> {ok, uint64};
+resolve_typerefs(int8, _) -> {ok, int8};
+resolve_typerefs(int16, _) -> {ok, int16};
+resolve_typerefs(int32, _) -> {ok, int32};
+resolve_typerefs(int64, _) -> {ok, int64};
+resolve_typerefs(string, _) -> {ok, string};
+resolve_typerefs(binary, _) -> {ok, binary};
+resolve_typerefs(varying_string, _) -> {ok, varying_string};
+resolve_typerefs(varying_binary, _) -> {ok, varying_binary};
+resolve_typerefs(T = {fixed_string, _}, _) -> {ok, T};
+resolve_typerefs(T = {fixed_binary, _}, _) -> {ok, T};
+resolve_typerefs(T = {fixed_binary, _, _}, _) -> {ok, T};
+resolve_typerefs(unicode, _) -> {ok, unicode};
+resolve_typerefs({custom, SubType0, Enc, Dec}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {custom, SubType1, Enc, Dec}};
+        Err -> Err
+    end;
+resolve_typerefs({fixed_array, N, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {fixed_array, N, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({conformant_array, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {conformant_array, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({varying_array, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {varying_array, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({array, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {array, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({pointer, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {pointer, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({struct, RecName, []}, _Idx) ->
+    {ok, {struct, RecName, []}};
+resolve_typerefs({struct, RecName, [{Field, SubType0} | Rest]}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, {struct, SubRecName0, SubFields}} ->
+            SubRecName1 = list_to_atom(atom_to_list(RecName) ++ "_" ++
+                atom_to_list(SubRecName0)),
+            SubType1 = {struct, SubRecName1, SubFields},
+            case resolve_typerefs({struct, RecName, Rest}, Idx) of
+                {ok, {struct, RecName, RestFields}} ->
+                    {ok, {struct, RecName, [{Field, SubType1} | RestFields]}};
+                Err -> Err
+            end;
+        {ok, SubType1} ->
+            case resolve_typerefs({struct, RecName, Rest}, Idx) of
+                {ok, {struct, RecName, RestFields}} ->
+                    {ok, {struct, RecName, [{Field, SubType1} | RestFields]}};
+                Err -> Err
+            end;
+        Err -> Err
+    end;
+resolve_typerefs(TypeName, Idx) when is_atom(TypeName) ->
+    case Idx of
+        #{TypeName := SubType0} ->
+            case resolve_typerefs(SubType0, Idx) of
+                {ok, SubType1} -> {ok, SubType1};
+                Err -> Err
+            end;
+        _ ->
+            {error, {undefined_type, TypeName}}
+    end.
 
 -spec var(string(), integer()) -> var().
 var(Prefix, N) ->
     erl_syntax:variable(list_to_atom(Prefix ++ integer_to_list(N))).
 
--spec ivar(integer(), integer()) -> var().
-ivar(Lvl, N) ->
-    erl_syntax:variable(list_to_atom("Bin" ++
-        integer_to_list(Lvl) ++ "_" ++ integer_to_list(N))).
--spec tvar(integer()) -> var().
+-spec concat_atoms([atom()]) -> expr().
+concat_atoms(Parts) ->
+    Name = lists:flatten(lists:join("_", [atom_to_list(X) || X <- Parts])),
+    NameAtom = list_to_atom(Name),
+    erl_syntax:atom(NameAtom).
+
+-spec enc_fun_name(type_path()) -> expr().
+enc_fun_name(Parts0) ->
+    concat_atoms([rpce, encode | Parts0]).
+-spec dec_fun_name(type_path()) -> expr().
+dec_fun_name(Parts0) ->
+    concat_atoms([rpce, decode | Parts0]).
+-spec finish_fun_name(type_path()) -> expr().
+finish_fun_name(Parts0) ->
+    concat_atoms([rpce, decode | Parts0] ++ [finish]).
+
+-spec enc_fun(type_path()) -> expr().
+enc_fun(Parts) ->
+    erl_syntax:implicit_fun(erl_syntax:arity_qualifier(enc_fun_name(Parts),
+        erl_syntax:integer(2))).
+-spec dec_fun(type_path()) -> expr().
+dec_fun(Parts) ->
+    erl_syntax:implicit_fun(erl_syntax:arity_qualifier(dec_fun_name(Parts),
+        erl_syntax:integer(1))).
+
+-type tvar() :: var().
+-type dvar() :: var().
+-type vvar() :: var().
+-type svar() :: var().
+-type ovar() :: var().
+
+-spec tvar(integer()) -> tvar().
 tvar(N) -> var("Temp", N).
--spec pvar(integer()) -> var().
-pvar(N) -> var("PtrMap", N).
--spec rvar(integer()) -> var().
-rvar(N) -> var("RefMap", N).
+-spec dvar(integer()) -> dvar().
+dvar(N) -> var("Data", N).
+-spec vvar(integer()) -> vvar().
+vvar(N) -> var("Value", N).
+-spec svar(integer()) -> svar().
+svar(N) -> var("State", N).
+-spec ovar(integer()) -> ovar().
+ovar(N) -> var("Offset", N).
 
--spec inc_ivar(#?MODULE{}) -> {var(), var(), #?MODULE{}}.
-inc_ivar(S0 = #?MODULE{ilvl = IL, inum = IN0}) ->
-    I0 = maps:get(IL, IN0, 0),
-    I1 = I0 + 1,
-    IN1 = IN0#{IL => I1},
-    S1 = S0#?MODULE{inum = IN1},
-    {ivar(IL, I0), ivar(IL, I1), S1}.
+-type fctx() :: [{struct, atom()} | {field, atom()}].
 
--spec inc_pvar(#?MODULE{}) -> {var(), var(), #?MODULE{}}.
-inc_pvar(S0 = #?MODULE{pnum = I0}) ->
-    I1 = I0 + 1,
-    S1 = S0#?MODULE{pnum = I1},
-    {pvar(I0), pvar(I1), S1}.
+-record(fstate, {
+    opts :: options(),
+    forms = [] :: [form()],
+    hoists = [] :: [{int_type(), expr()}],
+    unpacks = #{} :: #{fctx() => #{atom() => var()}},
+    maxlens = #{} :: #{fctx() => expr()},
+    customs = #{} :: #{var() => var()},
+    in_dblk = false :: boolean(),
+    obase = unknown :: integer() | unknown,
+    offset = 0 :: integer(),
+    tn = 0 :: integer(),
+    odn = 0 :: integer(),
+    sn = 0 :: integer(),
+    vn = 0 :: integer(),
+    ctx = [] :: fctx()
+    }).
+-type fstate() :: #fstate{}.
 
--spec inc_rvar(#?MODULE{}) -> {var(), var(), #?MODULE{}}.
-inc_rvar(S0 = #?MODULE{rnum = I0}) ->
-    I1 = I0 + 1,
-    S1 = S0#?MODULE{rnum = I1},
-    {rvar(I0), rvar(I1), S1}.
+-spec inc_odvar(fstate()) -> {dvar(), dvar(), ovar(), ovar(), fstate()}.
+inc_odvar(S0 = #fstate{in_dblk = false}) ->
+    S1 = open_dblk(S0),
+    inc_odvar(S1);
+inc_odvar(S0 = #fstate{odn = OD0, in_dblk = true}) ->
+    OD1 = OD0 + 1,
+    S1 = S0#fstate{odn = OD1},
+    {dvar(OD0), dvar(OD1), ovar(OD0), ovar(OD1), S1}.
 
--spec inc_tvar(#?MODULE{}) -> {var(), #?MODULE{}}.
-inc_tvar(S0 = #?MODULE{tnum = T0}) ->
-    S1 = S0#?MODULE{tnum = T0 + 1},
+open_dblk(S0 = #fstate{in_dblk = true}) ->
+    S0;
+open_dblk(S0 = #fstate{in_dblk = false, sn = SN0, odn = ODN0, forms = F0}) ->
+    SV0 = svar(SN0),
+    ODN1 = ODN0 + 1,
+    DV0 = dvar(ODN1),
+    OV0 = ovar(ODN1),
+    F = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(data), DV0),
+             erl_syntax:record_field(erl_syntax:atom(offset), OV0)]),
+        SV0),
+    S0#fstate{in_dblk = true, odn = ODN1, forms = F0 ++ [F]}.
+
+close_dblk(S0 = #fstate{in_dblk = false}) ->
+    S0;
+close_dblk(S0 = #fstate{in_dblk = true, sn = SN0, odn = ODN0, forms = F0}) ->
+    SN1 = SN0 + 1,
+    SV0 = svar(SN0),
+    SV1 = svar(SN1),
+    DV0 = dvar(ODN0),
+    OV0 = ovar(ODN0),
+    F = erl_syntax:match_expr(
+        SV1,
+        erl_syntax:record_expr(SV0, erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(data), DV0),
+             erl_syntax:record_field(erl_syntax:atom(offset), OV0)])),
+    S0#fstate{in_dblk = false, sn = SN1, forms = F0 ++ [F]}.
+
+-spec inc_tvar(fstate()) -> {tvar(), fstate()}.
+inc_tvar(S0 = #fstate{tn = T0}) ->
+    S1 = S0#fstate{tn = T0 + 1},
     {tvar(T0), S1}.
 
--spec ectx_push({atom(), atom()}, #?MODULE{}) -> #?MODULE{}.
-ectx_push({TypAtom, NameAtom}, S0 = #?MODULE{ectx = ECtx0}) ->
-    ECtx1 = [erl_syntax:tuple([
-        erl_syntax:atom(TypAtom), erl_syntax:atom(NameAtom)]) | ECtx0],
-    S0#?MODULE{ectx = ECtx1}.
--spec ectx_pop(#?MODULE{}) -> #?MODULE{}.
-ectx_pop(S0 = #?MODULE{ectx = ECtx0}) ->
-    [ _ | ECtx1 ] = ECtx0,
-    S0#?MODULE{ectx = ECtx1}.
+-spec inc_svar(fstate()) -> {svar(), svar(), fstate()}.
+inc_svar(S0 = #fstate{in_dblk = true}) ->
+    S1 = close_dblk(S0),
+    inc_svar(S1);
+inc_svar(S0 = #fstate{sn = I0, in_dblk = false}) ->
+    I1 = I0 + 1,
+    S1 = S0#fstate{sn = I1},
+    {svar(I0), svar(I1), S1}.
+
+-spec cur_svar(fstate()) -> {svar(), fstate()}.
+cur_svar(S0 = #fstate{in_dblk = true}) -> cur_svar(close_dblk(S0));
+cur_svar(S0 = #fstate{sn = I, in_dblk = false}) -> {svar(I), S0}.
+
+-spec inc_vvar(fstate()) -> {vvar(), vvar(), fstate()}.
+inc_vvar(S0 = #fstate{vn = I0}) ->
+    I1 = I0 + 1,
+    S1 = S0#fstate{vn = I1},
+    {vvar(I0), vvar(I1), S1}.
+
+-spec cur_vvar(fstate()) -> vvar().
+cur_vvar(#fstate{sn = I}) -> vvar(I).
+
+-spec push_struct(atom(), fstate()) -> fstate().
+push_struct(Struct, S0 = #fstate{ctx = Ctx0}) ->
+    Ctx1 = [{struct, Struct} | Ctx0],
+    S0#fstate{ctx = Ctx1}.
+-spec push_field(atom(), fstate()) -> fstate().
+push_field(Field, S0 = #fstate{ctx = Ctx0}) ->
+    Ctx1 = [{field, Field} | Ctx0],
+    S0#fstate{ctx = Ctx1}.
+-spec pop_struct(fstate()) -> fstate().
+pop_struct(S0 = #fstate{ctx = Ctx0}) ->
+    [{struct, _} | Ctx1] = Ctx0,
+    S0#fstate{ctx = Ctx1}.
+-spec pop_field(fstate()) -> fstate().
+pop_field(S0 = #fstate{ctx = Ctx0}) ->
+    [{field, _} | Ctx1] = Ctx0,
+    S0#fstate{ctx = Ctx1}.
+-spec build_struct_path(fstate()) -> type_path().
+build_struct_path(#fstate{ctx = Ctx}) ->
+    lists:foldl(fun
+        ({struct, Name}, Acc) -> [Name | Acc];
+        ({field, _}, Acc) -> Acc
+    end, [], Ctx).
+-spec build_enc_ectx(fstate()) -> expr().
+build_enc_ectx(#fstate{ctx = Ctx}) ->
+    StepsRev = lists:map(fun ({Type, Name}) ->
+        erl_syntax:tuple([erl_syntax:atom(Type), erl_syntax:atom(Name)])
+    end, Ctx),
+    erl_syntax:tuple(lists:reverse(StepsRev)).
+-spec build_ectx(fstate()) -> expr().
+build_ectx(#fstate{ctx = Ctx, odn = ODN0}) ->
+    StepsRev = lists:map(fun ({Type, Name}) ->
+        erl_syntax:tuple([erl_syntax:atom(Type), erl_syntax:atom(Name)])
+    end, Ctx),
+    PathExpr = erl_syntax:tuple(lists:reverse(StepsRev)),
+    erl_syntax:tuple([
+        erl_syntax:atom(invalid_data),
+        ovar(ODN0), PathExpr]).
 
 -spec pad_size(bytes(), bytes()) -> bytes().
 pad_size(Size, Off) ->
     Rem = Off rem Size,
-    PadSize = case Rem of
+    case Rem of
         0 -> 0;
         _ -> Size - Rem
     end.
 
 -spec type_align(rpce_type()) -> bytes().
 type_align(uint8) -> 1;
+type_align(boolean) -> 1;
 type_align(uint16) -> 2;
 type_align(uint32) -> 4;
 type_align(uint64) -> 8;
@@ -129,310 +440,1121 @@ type_align(int8) -> 1;
 type_align(int16) -> 2;
 type_align(int32) -> 4;
 type_align(int64) -> 8;
+type_align({custom, Base, _E, _D}) -> type_align(Base);
 type_align({fixed_array, _, T}) -> type_align(T);
-type_align({array, T}) -> lists:max([type_align(uint32), type_align(T)]);
+type_align({array, T}) -> lists:max([ type_align(uint32), type_align(T) ]);
+type_align({conformant_array, T}) -> lists:max([ type_align(uint32), type_align(T) ]);
+type_align({varying_array, T}) -> lists:max([ type_align(uint32), type_align(T) ]);
 type_align({pointer, _T}) -> type_align(uint32);
-type_align(str) -> type_align(uint32);
+type_align(string) -> type_align(uint32);
+type_align(binary) -> type_align(uint32);
+type_align(varying_binary) -> type_align(uint32);
+type_align(varying_string) -> type_align(uint32);
+type_align({fixed_string, _}) -> 1;
+type_align({fixed_binary, _}) -> 1;
+type_align({fixed_binary, _, A}) -> A;
 type_align(unicode) -> type_align(uint32);
-type_align(sid) -> type_align(uint32);
-type_align(filetime) -> type_align(uint32);
 type_align({struct, _Rec, Fields}) ->
     lists:max([ type_align(T) || {_Name, T} <- Fields ]).
 
--spec align_field_var(expr(), bytes()) -> expr().
-align_field_var(V, PadSize) ->
-    erl_syntax:binary_field(V, erl_syntax:integer(PadSize * 8), []).
--spec align_field_match(bytes()) -> expr().
-align_field_match(Size) ->
-    align_field_var(erl_syntax:underscore(), Size).
--spec align_field_zero(bytes()) -> expr().
-align_field_zero(Size) ->
-    align_field_var(erl_syntax:integer(0), Size).
+-spec add_encode_step(bytes(), [expr()], bytes() | expr(), fstate()) -> fstate().
+add_encode_step(Align, Fields, OffInc, S0 = #fstate{obase = N}) when Align > N ->
+    add_encode_step(Align, Fields, OffInc, S0#fstate{obase = unknown});
+add_encode_step(Align, Fields, OffInc, S0 = #fstate{obase = unknown}) ->
+    {SV0, SV1, S1} = inc_svar(S0),
+    Form = erl_syntax:match_expr(SV1,
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(align),
+            [erl_syntax:integer(Align), SV0])),
+    S2 = add_forms([Form], S1),
+    S3 = S2#fstate{obase = Align, offset = 0},
+    add_encode_step(Align, Fields, OffInc, S3);
+add_encode_step(Align, Fields, OffsetInc0, S0 = #fstate{offset = Offset0})
+                                                when is_integer(OffsetInc0) ->
+    {AlignFields, OffsetInc1} = case pad_size(Align, Offset0) of
+        0 -> {[], OffsetInc0};
+        Pad -> {[erl_syntax:binary_field(erl_syntax:integer(0),
+            erl_syntax:integer(Pad * 8), [])], OffsetInc0 + Pad}
+    end,
+    case {Fields, AlignFields} of
+        {[], []} ->
+            S0;
+        _ ->
+            {DV0, DV1, OV0, OV1, S1} = inc_odvar(S0),
+            F0 = erl_syntax:match_expr(DV1, erl_syntax:binary(
+                [erl_syntax:binary_field(DV0, [erl_syntax:atom(binary)])] ++
+                AlignFields ++
+                Fields)),
+            OffsetInc2 = erl_syntax:integer(OffsetInc1),
+            F1 = erl_syntax:match_expr(OV1, erl_syntax:infix_expr(
+                OV0, erl_syntax:operator('+'), OffsetInc2)),
+            S2 = S1#fstate{offset = Offset0 + OffsetInc1},
+            add_dblk_forms([F0, F1], S2)
+    end;
+add_encode_step(Align, Fields, OffsetInc0, S0 = #fstate{offset = Offset0}) ->
+    {AlignFields, OffsetInc1} = case pad_size(Align, Offset0) of
+        0 -> {[], OffsetInc0};
+        Pad -> {[erl_syntax:binary_field(erl_syntax:integer(0),
+            erl_syntax:integer(Pad * 8), [])],
+            erl_syntax:infix_expr(OffsetInc0, erl_syntax:operator('+'),
+                erl_syntax:integer(Pad))}
+    end,
+    case {Fields, AlignFields} of
+        {[], []} ->
+            S0;
+        _ ->
+            {DV0, DV1, OV0, OV1, S1} = inc_odvar(S0),
+            F0 = erl_syntax:match_expr(DV1, erl_syntax:binary(
+                [erl_syntax:binary_field(DV0, [erl_syntax:atom(binary)])] ++
+                AlignFields ++
+                Fields)),
+            F1 = erl_syntax:match_expr(OV1, erl_syntax:infix_expr(
+                OV0, erl_syntax:operator('+'), OffsetInc1)),
+            S2 = S1#fstate{obase = unknown, offset = 0},
+            add_dblk_forms([F0, F1], S2)
+    end.
 
--spec add_forms([form()], #?MODULE{}) -> #?MODULE{}.
-add_forms(Fs, S0 = #?MODULE{forms = F0}) ->
-    S1 = S0#?MODULE{forms = F0 ++ Fs},
-    S1.
--spec add_pack_form(form(), #?MODULE{}) -> #?MODULE{}.
-add_pack_form(F, S0 = #?MODULE{packforms = F0}) ->
-    S1 = S0#?MODULE{packforms = [F | F0]},
-    S1.
-
--spec int_encode(bits(), signed | unsigned, var(), #?MODULE{}) -> #?MODULE{}.
-int_encode(Bits, Signed, SrcVar, S0 = #?MODULE{opts = Opts, offset = O0}) ->
-    Endian = maps:get(endian, Opts, big),
-    {IV0, IV1, S1} = inc_ivar(S0),
-    Padding = pad_size(Bits div 8, O0),
-    F = erl_syntax:match_expr(IV1,
-        erl_syntax:binary([
-            erl_syntax:binary_field(IV0, [erl_syntax:atom(binary)]),
-            align_field_zero(Padding),
-            erl_syntax:binary_field(SrcVar, erl_syntax:integer(Bits),
-                [erl_syntax:atom(Endian), erl_syntax:atom(Signed)])
-            ])),
-    S2 = add_forms([F], S1),
-    S2#?MODULE{offset = O0 + Padding + (Bits div 8)}.
-
--spec decode_case(var(), [var()], expr(), bytes(), [form()]) -> expr().
-decode_case(InVar, OutVars, OkMatch, Off, ECtx) ->
-    erl_syntax:case_expr(
-        InVar, [
-            erl_syntax:clause([OkMatch], [], [erl_syntax:atom(ok)]),
-            erl_syntax:clause(
-                [erl_syntax:underscore()], [],
+-spec add_decode_step(bytes(), [expr()], bytes(), fstate()) -> fstate().
+add_decode_step(Align, Fields, OffInc, S0 = #fstate{obase = N}) when Align > N ->
+    add_decode_step(Align, Fields, OffInc, S0#fstate{obase = unknown});
+add_decode_step(Align, Fields, OffInc, S0 = #fstate{obase = unknown}) ->
+    {SV0, SV1, S1} = inc_svar(S0),
+    Form = erl_syntax:match_expr(SV1,
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(align),
+            [erl_syntax:integer(Align), SV0])),
+    S2 = add_forms([Form], S1),
+    S3 = S2#fstate{obase = Align, offset = 0},
+    add_decode_step(Align, Fields, OffInc, S3);
+add_decode_step(Align, Fields, OffsetInc0, S0 = #fstate{offset = Offset0}) ->
+    {AlignFields, OffsetInc1} = case pad_size(Align, Offset0) of
+        0 -> {[], OffsetInc0};
+        Pad ->
+            OO = if
+                is_integer(OffsetInc0) -> OffsetInc0 + Pad;
+                true -> erl_syntax:infix_expr(OffsetInc0,
+                    erl_syntax:operator('+'), erl_syntax:integer(Pad))
+            end,
+            {[erl_syntax:binary_field(erl_syntax:underscore(),
+                erl_syntax:integer(Pad * 8), [])], OO}
+    end,
+    case {Fields, AlignFields} of
+        {[], []} ->
+            S0;
+        _ ->
+            S1 = open_dblk(S0),
+            ECtx = build_ectx(S1),
+            {DV0, DV1, OV0, OV1, S2} = inc_odvar(S1),
+            OutVars0 = lists:foldl(fun (Field, Acc) ->
+                Body = erl_syntax:binary_field_body(Field),
+                case erl_syntax:type(Body) of
+                    size_qualifier ->
+                        Var = erl_syntax:size_qualifier_body(Body),
+                        [Var | Acc];
+                    variable ->
+                        [Body | Acc]
+                end
+            end, [], Fields),
+            OutVars1 = [DV1 | OutVars0],
+            Clause0 = erl_syntax:clause([erl_syntax:binary(
+                    AlignFields ++
+                    Fields ++
+                    [erl_syntax:binary_field(DV1, [erl_syntax:atom(binary)])]
+                )], [], [erl_syntax:atom(ok)]),
+            Clause1 = erl_syntax:clause([erl_syntax:underscore()], [],
                 lists:map(fun (Var) ->
                     erl_syntax:match_expr(Var, erl_syntax:atom(error))
-                end, OutVars) ++
-                [
+                end, OutVars1) ++ [
                     erl_syntax:application(
                         erl_syntax:atom('error'),
-                        [erl_syntax:tuple([
-                            erl_syntax:atom(invalid_data),
-                            erl_syntax:integer(Off),
-                            erl_syntax:list(ECtx)
-                            ])])
-                ])
+                        [ECtx])
+                ]),
+            F0 = erl_syntax:case_expr(DV0, [Clause0, Clause1]),
+            OffsetIncExpr = if
+                is_integer(OffsetInc1) -> erl_syntax:integer(OffsetInc1);
+                true -> OffsetInc1
+            end,
+            F1 = erl_syntax:match_expr(OV1, erl_syntax:infix_expr(
+                OV0, erl_syntax:operator('+'), OffsetIncExpr)),
+            S3 = if
+                is_integer(OffsetInc1) ->
+                    S2#fstate{offset = Offset0 + OffsetInc1};
+                true ->
+                    S2#fstate{offset = 0, obase = unknown}
+            end,
+            add_dblk_forms([F0, F1], S3)
+    end.
+
+-spec add_forms([form()], fstate()) -> fstate().
+add_forms(Fs, S0 = #fstate{forms = F0}) ->
+    S0#fstate{forms = F0 ++ Fs}.
+
+-spec add_forms([form()], integer(), fstate()) -> fstate().
+add_forms(Fs, OffsetIncr, S0 = #fstate{forms = F0, offset = O0}) ->
+    S0#fstate{forms = F0 ++ Fs, offset = O0 + OffsetIncr}.
+
+-spec add_dblk_forms([form()], fstate()) -> fstate().
+add_dblk_forms(Fs, S0 = #fstate{in_dblk = true}) ->
+    add_forms(Fs, S0).
+
+-spec add_hoist(int_type(), expr(), fstate()) -> fstate().
+add_hoist(Type, Expr, S0 = #fstate{hoists = H0}) ->
+    S0#fstate{hoists = H0 ++ [{Type, Expr}]}.
+
+-spec int_encode(bits(), signed | unsigned, var(), fstate()) -> fstate().
+int_encode(Bits, Signed, SrcVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    Field = erl_syntax:binary_field(SrcVar, erl_syntax:integer(Bits),
+        [erl_syntax:atom(Endian), erl_syntax:atom(Signed)]),
+    add_encode_step(Bits div 8, [Field], Bits div 8, S0).
+
+-spec int_decode(bits(), unsigned | signed, var(), fstate()) -> fstate().
+int_decode(Bits, Signed, OutVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    Field = erl_syntax:binary_field(OutVar, erl_syntax:integer(Bits),
+        [erl_syntax:atom(Endian), erl_syntax:atom(Signed)]),
+    add_decode_step(Bits div 8, [Field], Bits div 8, S0).
+
+str_len_expr(Var) ->
+    erl_syntax:if_expr([
+        erl_syntax:clause([],
+            [erl_syntax:application(erl_syntax:atom(is_binary), [Var])],
+            [erl_syntax:application(erl_syntax:atom(byte_size), [Var])]),
+        erl_syntax:clause([],
+            [erl_syntax:application(erl_syntax:atom(is_list), [Var])],
+            [erl_syntax:application(erl_syntax:atom(length), [Var])])
         ]).
 
--spec int_decode(bits(), unsigned | signed, var(), #?MODULE{}) -> #?MODULE{}.
-int_decode(Bits, Signed, OutVar, S0 = #?MODULE{opts = Opts, offset = O0}) ->
+-spec encode_data(rpce_type(), var(), fstate()) -> fstate().
+encode_data({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C}) ->
+    #{SrcVar := TVar} = C,
+    encode_data(Base, TVar, S0);
+
+encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
+                                                       (T =:= binary) ->
     Endian = maps:get(endian, Opts, big),
-    {IV0, IV1, S1} = inc_ivar(S0),
-    Padding = pad_size(Bits div 8, O0),
-    F = decode_case(IV0, [IV1, OutVar],
-        erl_syntax:binary([
-            align_field_match(Padding),
-            erl_syntax:binary_field(OutVar, erl_syntax:integer(Bits),
-                [erl_syntax:atom(Endian), erl_syntax:atom(Signed)]),
-            erl_syntax:binary_field(IV1, [erl_syntax:atom(binary)])
-            ]),
-        O0, S0#?MODULE.ectx),
-    S2 = add_forms([F], S1),
-    S2#?MODULE{offset = O0 + Padding + (Bits div 8)}.
-
--spec encode(rpce_type(), var(), #?MODULE{}) -> #?MODULE{}.
-encode(uint8, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(8, unsigned, SrcVar, S0);
-encode(uint16, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(16, unsigned, SrcVar, S0);
-encode(uint32, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(32, unsigned, SrcVar, S0);
-encode(uint64, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(64, unsigned, SrcVar, S0);
-encode(int8, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(8, signed, SrcVar, S0);
-encode(int16, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(16, signed, SrcVar, S0);
-encode(int32, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(32, signed, SrcVar, S0);
-encode(int64, SrcVar, S0 = #?MODULE{}) ->
-    int_encode(64, signed, SrcVar, S0);
-
-encode({struct, Record, Fields}, SrcVar, S0 = #?MODULE{offset = O0}) ->
-    Alignment = type_align({struct, Record, Fields}),
-    Padding = pad_size(Alignment, O0),
-    S1 = S0#?MODULE{offset = O0 + Padding},
-    {IV0, IV1, S2} = inc_ivar(S1),
-    F0 = case Padding of
-        0 ->
-            erl_syntax:match_expr(IV1, IV0);
-        _ ->
-            erl_syntax:match_expr(IV1,
-                erl_syntax:binary([
-                    erl_syntax:binary_field(IV0, [erl_syntax:atom(binary)]),
-                    align_field_zero(Padding)
-                ]))
+    {TVar, S1} = inc_tvar(S0),
+    F0 = erl_syntax:match_expr(TVar, str_len_expr(SrcVar)),
+    S2 = add_forms([F0], S1),
+    % max count = length(Input) + 1
+    LenExpr = case T of
+        string ->
+            erl_syntax:infix_expr(TVar,
+                erl_syntax:operator('+'), erl_syntax:integer(1));
+        binary ->
+            TVar
     end,
-    {FieldMapRev, S3} = lists:foldl(fun ({FName, FType}, {M0, SS0}) ->
-        {FVar, SS1} = inc_tvar(SS0),
-        M1 = [{FName, FType, FVar} | M0],
-        {M1, SS1}
-    end, {[], S2}, Fields),
-    FieldMap = lists:reverse(FieldMapRev),
-    FieldExprs = lists:map(fun ({FName, _FType, FVar}) ->
-        erl_syntax:record_field(
-            erl_syntax:atom(FName),
-            FVar)
-    end, FieldMap),
-    F1 = erl_syntax:match_expr(
-        erl_syntax:record_expr(erl_syntax:atom(Record), FieldExprs),
-        SrcVar
-        ),
-    S4 = add_forms([F0, F1], S3),
-    lists:foldl(fun ({_FName, FType, FVar}, SS0) ->
-        encode(FType, FVar, SS0)
-    end, S4, FieldMap).
+    F1 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % offset = 0
+    F2 = erl_syntax:binary_field(erl_syntax:integer(0),
+        erl_syntax:integer(32), []),
+    % actual count = length(Input) + 1
+    F3 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % string data
+    DataExpr = erl_syntax:application(erl_syntax:atom(iolist_to_binary),
+        [erl_syntax:list([SrcVar])]),
+    F4 = erl_syntax:binary_field(DataExpr, [erl_syntax:atom(binary)]),
+    % terminator
+    F5s = case T of
+        string -> [erl_syntax:binary_field(erl_syntax:integer(0))];
+        binary -> []
+    end,
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
+        erl_syntax:operator('+'), LenExpr),
+    add_encode_step(4, [F1, F2, F3, F4] ++ F5s, OffsetInc, S2);
 
-encode_defers(S0 = #?MODULE{defer = #{}}) ->
-    S0;
-encode_defers(S0 = #?MODULE{defer = Defers}) ->
-    {DeferVar, S1} = inc_tvar(S0),
-    {OuterInput, OuterOutput, S2} = inc_ivar(S1),
-    #?MODULE{rnum = R0} = S2,
-    RVar = rvar(R0),
-    F0 = erl_syntax:match_expr(
-        DeferVar,
+encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= varying_string) or
+                                                       (T =:= varying_binary) ->
+    Endian = maps:get(endian, Opts, big),
+    {TVar, S1} = inc_tvar(S0),
+    F0 = erl_syntax:match_expr(TVar, str_len_expr(SrcVar)),
+    S2 = add_forms([F0], S1),
+    % offset = 0
+    F1 = erl_syntax:binary_field(erl_syntax:integer(0),
+        erl_syntax:integer(32), []),
+    % actual count = length(Input) + 1
+    LenExpr = case T of
+        varying_string ->
+            erl_syntax:infix_expr(TVar,
+                erl_syntax:operator('+'), erl_syntax:integer(1));
+        varying_binary ->
+            TVar
+    end,
+    F2 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % string data
+    DataExpr = erl_syntax:application(erl_syntax:atom(iolist_to_binary),
+        [erl_syntax:list([SrcVar])]),
+    F3 = erl_syntax:binary_field(DataExpr, [erl_syntax:atom(binary)]),
+    % terminator
+    F4s = case T of
+        varying_string -> [erl_syntax:binary_field(erl_syntax:integer(0))];
+        varying_binary -> []
+    end,
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
+        erl_syntax:operator('+'), LenExpr),
+    add_encode_step(4, [F1, F2, F3] ++ F4s, OffsetInc, S2);
+
+encode_data(unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {TVar, S1} = inc_tvar(S0),
+    F0 = erl_syntax:match_expr(TVar,
         erl_syntax:application(
-            erl_syntax:atom(lists), erl_syntax:atom(sort), [
-                erl_syntax:application(
-                    erl_syntax:atom(maps), erl_syntax:atom(keys),
-                    [RVar0])])),
-    F1 = erl_syntax:match_expr(
-        OuterOutput,
+            erl_syntax:atom(unicode), erl_syntax:atom(characters_to_binary),
+            [SrcVar, erl_syntax:atom(utf8),
+             erl_syntax:tuple(
+                [erl_syntax:atom(utf16), erl_syntax:atom(little)])
+            ])),
+    % max count = string:length(Input) + 1
+    LenExpr = erl_syntax:infix_expr(
         erl_syntax:application(
-            erl_syntax:atom(lists), erl_syntax:atom(foldl), [
-                erl_syntax:fun_expr([
-                    ]),
-                OuterInput, DeferVar])),
-    S3 = add_forms([F0, F1], S2).
+            erl_syntax:atom(string), erl_syntax:atom(length),
+            [SrcVar]),
+        erl_syntax:operator('+'), erl_syntax:integer(1)),
+    F1 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % offset = 0
+    F2 = erl_syntax:binary_field(erl_syntax:integer(0),
+        erl_syntax:integer(32), []),
+    % actual count = string:length(Input) + 1
+    F3 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % string data
+    F4 = erl_syntax:binary_field(TVar, [erl_syntax:atom(binary)]),
+    % terminator
+    F5 = erl_syntax:binary_field(erl_syntax:integer(0),
+        erl_syntax:integer(16), []),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
+        erl_syntax:operator('+'),
+        erl_syntax:infix_expr(LenExpr, erl_syntax:operator('*'),
+            erl_syntax:integer(2))),
+    S2 = add_forms([F0], S1),
+    add_encode_step(4, [F1, F2, F3, F4, F5], OffsetInc, S2);
 
--spec encode_func_form(atom(), rpce_type(), undefined | integer(), options()) -> erl_parse:abstract_form().
-encode_func_form(Name, Type, L0, Opts) ->
-    L = case L0 of
-        undefined -> 2;
-        _ -> L0
-    end,
-    In0 = erl_syntax:match_expr(
-        ivar(0, 0),
-        erl_syntax:binary([])),
-    In1 = erl_syntax:match_expr(
-        pvar(0),
-        erl_syntax:map_expr([])),
-    In2 = erl_syntax:match_expr(
-        rvar(0),
-        erl_syntax:map_expr([])),
-    S0 = #?MODULE{opts = Opts, forms = [In0, In1, In2]},
-    InVar = erl_syntax:variable('Input'),
-    S1 = encode(Type, InVar, S0),
-    S2 = encode_defers(S1),
-    #?MODULE{forms = InnerForms, inum = I} = S2,
-    F0 = erl_syntax:function(
-        erl_syntax:atom(Name),
-        [erl_syntax:clause([InVar], [], InnerForms ++ [ivar(0, I)])]),
-    F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, L)
-    end, F1).
-
-
--spec decode(rpce_type(), var(), #?MODULE{}) -> #?MODULE{}.
-decode(uint8, OutVar, S0 = #?MODULE{}) ->
-    int_decode(8, unsigned, OutVar, S0);
-decode(uint16, OutVar, S0 = #?MODULE{}) ->
-    int_decode(16, unsigned, OutVar, S0);
-decode(uint32, OutVar, S0 = #?MODULE{}) ->
-    int_decode(32, unsigned, OutVar, S0);
-decode(uint64, OutVar, S0 = #?MODULE{}) ->
-    int_decode(64, unsigned, OutVar, S0);
-decode(int8, OutVar, S0 = #?MODULE{}) ->
-    int_decode(8, signed, OutVar, S0);
-decode(int16, OutVar, S0 = #?MODULE{}) ->
-    int_decode(16, signed, OutVar, S0);
-decode(int32, OutVar, S0 = #?MODULE{}) ->
-    int_decode(32, signed, OutVar, S0);
-decode(int64, OutVar, S0 = #?MODULE{}) ->
-    int_decode(64, signed, OutVar, S0);
-
-decode({struct, Record, Fields}, OutVar, S0 = #?MODULE{offset = O0}) ->
-    Alignment = type_align({struct, Record, Fields}),
-    Padding = pad_size(Alignment, O0),
-    S1 = ectx_push({struct, Record}, S0#?MODULE{offset = O0 + Padding}),
-    {IV0, IV1, S2} = inc_ivar(S1),
-    F0 = case Padding of
-        0 ->
-            erl_syntax:match_expr(IV1, IV0);
-        _ ->
-            decode_case(IV0, [IV1],
-                erl_syntax:binary([
-                    align_field_match(Padding),
-                    erl_syntax:binary_field(IV1, [erl_syntax:atom(binary)])
-                    ]),
-                O0, S0#?MODULE.ectx)
-    end,
-    {FieldMapRev, S3} = lists:foldl(fun ({FName, FType}, {M0, SS0}) ->
-        {FVar, SS1} = inc_tvar(SS0),
-        M1 = [{FName, FType, FVar} | M0],
-        {M1, SS1}
-    end, {[], S2}, Fields),
-    FieldMap = lists:reverse(FieldMapRev),
-    FieldExprs = lists:map(fun ({FName, _FType, FVar}) ->
-        erl_syntax:record_field(
-            erl_syntax:atom(FName),
-            FVar)
-    end, FieldMap),
-    S4 = add_forms([F0], S3),
-    S5 = lists:foldl(fun ({FName, FType, FVar}, SS0) ->
-        SS1 = ectx_push({field, FName}, SS0),
-        ectx_pop(decode(FType, FVar, SS1))
-    end, S4, FieldMap),
-    F1 = erl_syntax:match_expr(
-        OutVar,
-        erl_syntax:record_expr(erl_syntax:atom(Record), FieldExprs)
-        ),
-    ectx_pop(add_forms([F1], S5)).
-
--spec decode_func_form(atom(), rpce_type(), undefined | integer(), options()) -> erl_parse:abstract_form().
-decode_func_form(Name, Type, L0, Opts) ->
-    L = case L0 of
-        undefined -> 2;
-        _ -> L0
-    end,
-    S0 = #?MODULE{opts = Opts, forms = []},
-    OutVar = erl_syntax:variable('Output'),
-    S1 = decode(Type, OutVar, S0),
-    #?MODULE{forms = InnerForms, inum = I} = S1,
-    Out = erl_syntax:tuple([
-        erl_syntax:atom(ok),
-        OutVar,
-        ivar(I)
+encode_data({fixed_binary, N, A}, SrcVar, S0 = #fstate{}) ->
+    LenExpr = erl_syntax:application(erl_syntax:atom(byte_size), [SrcVar]),
+    AssertForm = erl_syntax:case_expr(LenExpr, [
+        erl_syntax:clause([erl_syntax:integer(N)], [],
+            [erl_syntax:atom(ok)]),
+        erl_syntax:clause([erl_syntax:underscore()], [],
+            [erl_syntax:application(
+                erl_syntax:atom(error),
+                [erl_syntax:tuple([
+                    erl_syntax:atom(bad_fixed_binary_size),
+                    erl_syntax:integer(N),
+                    LenExpr,
+                    build_enc_ectx(S0)])])])
         ]),
+    S1 = add_forms([AssertForm], S0),
+    Field = erl_syntax:binary_field(SrcVar, [erl_syntax:atom(binary)]),
+    add_encode_step(A, [Field], N, S1);
+
+encode_data({fixed_binary, N}, SrcVar, S0 = #fstate{}) ->
+    encode_data({fixed_binary, N, 1}, SrcVar, S0);
+
+encode_data({fixed_array, Count, Type}, SrcVar, S0 = #fstate{}) ->
+    LenExpr = erl_syntax:application(erl_syntax:atom(length), [SrcVar]),
+    AssertForm = erl_syntax:case_expr(LenExpr, [
+        erl_syntax:clause([erl_syntax:integer(Count)], [],
+            [erl_syntax:atom(ok)]),
+        erl_syntax:clause([erl_syntax:underscore()], [],
+            [erl_syntax:application(
+                erl_syntax:atom(error),
+                [erl_syntax:tuple([
+                    erl_syntax:atom(bad_fixed_array_length),
+                    erl_syntax:integer(Count),
+                    LenExpr,
+                    build_enc_ectx(S0)])])])
+        ]),
+    S1 = add_forms([AssertForm], S0),
+    encode_data({conformant_array, Type}, SrcVar, S1);
+
+encode_data({conformant_array, _Type}, SrcVar, S0 = #fstate{}) ->
+    % max has already been hoisted out
+    #fstate{ctx = [{field, FName} | _]} = S0,
+    EncodeFun = enc_fun(build_struct_path(S0) ++ ['_A', FName]),
+    {SV0, SV1, S1} = inc_svar(S0),
+    Form = erl_syntax:match_expr(SV1,
+        erl_syntax:application(
+            erl_syntax:atom(lists), erl_syntax:atom(foldl),
+            [EncodeFun, SV0, SrcVar])),
+    S2 = add_forms([Form], S1),
+    S2#fstate{obase = unknown};
+
+encode_data({varying_array, Type}, SrcVar, S0 = #fstate{opts = Opts}) ->
+    % max has already been hoisted out
+    Endian = maps:get(endian, Opts, big),
+    LenExpr = erl_syntax:application(erl_syntax:atom(length), [SrcVar]),
+    % actual count
+    F0 = erl_syntax:binary_field(LenExpr, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S1 = add_encode_step(4, [F0], 8, S0),
+    encode_data({conformant_array, Type}, SrcVar, S1);
+
+encode_data({array, Type}, SrcVar, S0 = #fstate{opts = Opts}) ->
+    % max has already been hoisted out
+    Endian = maps:get(endian, Opts, big),
+    LenExpr = erl_syntax:application(erl_syntax:atom(length), [SrcVar]),
+    % offset = 0
+    F0 = erl_syntax:binary_field(erl_syntax:integer(0),
+        erl_syntax:integer(32), []),
+    % actual count
+    F1 = erl_syntax:binary_field(LenExpr, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S1 = add_encode_step(4, [F0, F1], 8, S0),
+    encode_data({conformant_array, Type}, SrcVar, S1);
+
+encode_data(boolean, SrcVar, S0 = #fstate{}) ->
+    IntValExpr = erl_syntax:case_expr(SrcVar,
+        [erl_syntax:clause([erl_syntax:atom(true)], [], [erl_syntax:integer(1)]),
+         erl_syntax:clause([erl_syntax:atom(false)], [], [erl_syntax:integer(0)])]),
+    int_encode(8, unsigned, IntValExpr, S0);
+
+encode_data(PrimType, SrcVar, S0 = #fstate{}) when is_atom(PrimType) ->
+    case PrimType of
+        uint8   -> int_encode(8 , unsigned, SrcVar, S0);
+        uint16  -> int_encode(16, unsigned, SrcVar, S0);
+        uint32  -> int_encode(32, unsigned, SrcVar, S0);
+        uint64  -> int_encode(64, unsigned, SrcVar, S0);
+        int8    -> int_encode(8 , signed,   SrcVar, S0);
+        int16   -> int_encode(16, signed,   SrcVar, S0);
+        int32   -> int_encode(32, signed,   SrcVar, S0);
+        int64   -> int_encode(64, signed,   SrcVar, S0)
+    end;
+
+encode_data(Type = {pointer, RefType}, SrcVar, S0 = #fstate{}) ->
+    S1 = add_encode_step(type_align(Type), [], 0, S0),
+    {SV0, SV1, S2} = inc_svar(S1),
+    {Fun, ErrName} = case RefType of
+        {struct, RefStruct, _} ->
+            {enc_fun(build_struct_path(push_struct(RefStruct, S2))),
+             RefStruct};
+        _Other ->
+            #fstate{ctx = [{field, FName} | _]} = S0,
+            {enc_fun(build_struct_path(S2) ++ ['_F', FName]),
+             FName}
+    end,
+    Form = erl_syntax:match_expr(
+        SV1,
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(write_ptr),
+            [erl_syntax:atom(ErrName),
+             erl_syntax:integer(type_align(RefType)),
+             Fun, SrcVar, SV0])),
+    add_forms([Form], 4, S2);
+
+encode_data(Type = {struct, Record, Fields}, SrcVar, S0 = #fstate{}) ->
+    Align = type_align(Type),
+    S1 = push_struct(Record, S0),
+    #fstate{ctx = Ctx, unpacks = U} = S1,
+    #{Ctx := FieldMap} = U,
+    S2 = add_encode_step(Align, [], 0, S1),
+    S3 = lists:foldl(fun ({FName, FType}, SS0) ->
+        #{FName := FVar} = FieldMap,
+        SS1 = push_field(FName, SS0),
+        SS2 = encode_data(FType, FVar, SS1),
+        pop_field(SS2)
+    end, S2, Fields),
+    pop_struct(S3).
+
+-spec encode_unpacks(rpce_type(), var(), fstate()) -> fstate().
+encode_unpacks(PrimType, _SrcVar, S0 = #fstate{}) when is_atom(PrimType) ->
+    S0;
+encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
+    {TVar, S1} = inc_tvar(S0),
+    C1 = C0#{SrcVar => TVar},
+    S2 = S1#fstate{customs = C1},
+    Form = erl_syntax:match_expr(TVar,
+        erl_syntax:application(Enc, [SrcVar])),
+    S3 = add_forms([Form], S2),
+    encode_unpacks(Base, TVar, S3);
+encode_unpacks({conformant_array, Type}, SrcVar, S0 = #fstate{}) ->
+    MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
+        [SrcVar]),
+    add_hoist(uint32, MaxLenExpr, S0);
+encode_unpacks({array, Type}, SrcVar, S0 = #fstate{}) ->
+    MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
+        [SrcVar]),
+    add_hoist(uint32, MaxLenExpr, S0);
+encode_unpacks({fixed_array, _N, Type}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({varying_array, Type}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({pointer, _RefType}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({fixed_binary, _N}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({fixed_binary, _N, _A}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({fixed_string, _N}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({struct, Record, Fields}, SrcVar, S0 = #fstate{}) ->
+    S1 = push_struct(Record, S0),
+    {FieldMap, S2} = lists:foldl(fun ({FName, _FType}, {M0, SS0}) ->
+        {FVar, SS1} = inc_tvar(SS0),
+        M1 = M0#{FName => FVar},
+        {M1, SS1}
+    end, {#{}, S1}, Fields),
+    FieldExprs = maps:fold(fun (FName, FVar, Acc) ->
+        [erl_syntax:record_field(
+            erl_syntax:atom(FName),
+            FVar) | Acc]
+    end, [], FieldMap),
+    UnpackForm = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(Record), FieldExprs),
+        SrcVar),
+    S3 = add_forms([UnpackForm], S2),
+    #fstate{ctx = Ctx, unpacks = U0} = S3,
+    U1 = U0#{Ctx => FieldMap},
+    S4 = S3#fstate{unpacks = U1},
+    S5 = lists:foldl(fun ({FName, FType}, SS0) ->
+        #{FName := FVar} = FieldMap,
+        SS1 = push_field(FName, SS0),
+        SS2 = encode_unpacks(FType, FVar, SS1),
+        pop_field(SS2)
+    end, S4, Fields),
+    pop_struct(S5).
+
+-spec encode_hoists(rpce_type(), var(), fstate()) -> fstate().
+encode_hoists(_TopType, _SrcVar, S0 = #fstate{hoists = []}) ->
+    S0;
+encode_hoists(TopType, SrcVar, S0 = #fstate{hoists = [{Type, Expr} | Rest]}) ->
+    S1 = encode_data(Type, Expr, S0),
+    encode_hoists(TopType, SrcVar, S1#fstate{hoists = Rest}).
+
+-spec encode_struct_func_form(type_path(), rpce_type(), loc(), options()) -> [form()].
+encode_struct_func_form(Path0, Type, Loc, Opts) ->
+    io:format("compile ~p: ~p\n", [Path0, Type]),
+    Ctx0 = lists:foldl(fun (Struct, Acc) ->
+        [{struct, Struct} | Acc]
+    end, [], Path0),
+    {FunName, Ctx1} = case (catch lists:last(Path0)) of
+        {'EXIT', _} ->
+            {struct, RecName, _} = Type,
+            {enc_fun_name(Path0 ++ [RecName]), Ctx0};
+        {scalar_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {enc_fun_name(P ++ ['_F', FieldName]), [{field, FieldName} | C]};
+        {array_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {enc_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        _ ->
+            {struct, RecName, _} = Type,
+            {enc_fun_name(Path0 ++ [RecName]), Ctx0}
+    end,
+    S0 = #fstate{ctx = Ctx1, opts = Opts},
+    InVar = erl_syntax:variable('Input'),
+    SV0 = svar(0),
+    S1 = encode_unpacks(Type, InVar, S0),
+    S2 = encode_hoists(Type, InVar, S1),
+    S3 = encode_data(Type, InVar, S2),
+    S4 = close_dblk(S3),
+    #fstate{forms = Forms, sn = SN1} = S4,
+    SV1 = svar(SN1),
     F0 = erl_syntax:function(
-        erl_syntax:atom(Name),
-        [erl_syntax:clause([ivar(0)], [],
-            InnerForms ++ [Out])]),
+        FunName,
+        [erl_syntax:clause([InVar, SV0], [], Forms ++ [SV1])]),
     F1 = erl_syntax:revert(F0),
     erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, L)
+        erl_anno:set_generated(true, Loc)
     end, F1).
 
-make_forms([]) -> [];
-make_forms(Tokens) ->
-    {BeforeDot, AfterDot0} = lists:splitwith(fun
-        ({dot, _}) -> false;
-        (_) -> true
-    end, Tokens),
-    [Dot = {dot, _} | AfterDot1] = AfterDot0,
-    {ok, Form} = erl_parse:parse_form(BeforeDot ++ [Dot]),
-    [Form | make_forms(AfterDot1)].
+encode_func_form({struct, RecName, _}, Loc) ->
+    InVar = erl_syntax:variable('Input'),
+    FF0 = erl_syntax:match_expr(svar(0),
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(mode),
+                erl_syntax:atom(encode)),
+             erl_syntax:record_field(erl_syntax:atom(data),
+                erl_syntax:binary([]))])),
+    FF1 = erl_syntax:match_expr(svar(1),
+        erl_syntax:application(enc_fun_name([RecName]),
+            [InVar, svar(0)])),
+    FF2 = erl_syntax:match_expr(svar(2), erl_syntax:application(
+        erl_syntax:atom(msrpce_runtime), erl_syntax:atom(finish),
+        [svar(1)])),
+    FF3 = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(data), dvar(0))]),
+        svar(2)),
+    FF4 = dvar(0),
+    F0 = erl_syntax:function(
+        concat_atoms([encode, RecName]),
+        [erl_syntax:clause([InVar], [], [FF0, FF1, FF2, FF3, FF4])]),
+    F1 = erl_syntax:revert(F0),
+    erl_parse:map_anno(fun (_) ->
+        erl_anno:set_generated(true, Loc)
+    end, F1).
 
-compile_module(Name, Type, Opts) ->
-    ModName = binary_to_atom(iolist_to_binary([
-        "msrpce_dyn_", integer_to_binary(erlang:unique_integer([positive]))
-        ])),
-    RecordsPath = code:lib_dir(msrpce) ++ "/include/records.hrl",
-    {ok, Data} = file:read_file(RecordsPath),
-    {ok, RecTokens, _} = erl_scan:string(
-        unicode:characters_to_list(Data, utf8)),
-    RecForms = make_forms(RecTokens),
-    NameStr = atom_to_list(Name),
-    DecodeName = list_to_atom("decode_" ++ NameStr),
-    EncodeName = list_to_atom("encode_" ++ NameStr),
-    ModHeaderForms = [
-        {attribute, 1, module, ModName},
-        {attribute, 1, export, [{EncodeName, 1}, {DecodeName, 1}]}],
-    EncodeForm = encode_func_form(EncodeName, Type, 2, Opts),
-    DecodeForm = decode_func_form(DecodeName, Type, 2, Opts),
-    Forms = ModHeaderForms ++ RecForms ++ [EncodeForm, DecodeForm],
-    case compile:forms(Forms, [return_errors]) of
-        {ok, Mod, Bin} ->
-            {module, Mod} = code:load_binary(Mod, "msrpce_dynamic", Bin),
-            {ok, Mod};
-        {ok, Mod, Bin, _Warnings} ->
-            {module, Mod} = code:load_binary(Mod, "msrpce_dynamic", Bin),
-            {ok, Mod};
-        {error, [{_, Errs}], _Warnings} ->
-            FormatErrs = lists:map(fun ({_Loc, _Mod, Desc}) ->
-                compile:format_error(Desc)
-            end, Errs),
-            {error, iolist_to_binary(FormatErrs)}
-    end.
+-spec decode_data(rpce_type(), var(), fstate()) -> fstate().
+decode_data({custom, Base, _Enc, _Dec}, DstVar, S0 = #fstate{}) ->
+    decode_data(Base, DstVar, S0);
+
+decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
+                                                       (T =:= binary) ->
+    Endian = maps:get(endian, Opts, big),
+    {MaxLenVar, S1} = inc_tvar(S0),
+    {RestVar, S2} = inc_tvar(S1),
+    {OffsetVar, S3} = inc_tvar(S2),
+    {LenVar, S4} = inc_tvar(S3),
+    {UnsplitVar, S5} = inc_tvar(S4),
+    {SplitVar, S6} = inc_tvar(S5),
+    Field0 = erl_syntax:binary_field(MaxLenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field1 = erl_syntax:binary_field(OffsetVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field2 = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field3 = erl_syntax:binary_field(RestVar, MaxLenVar,
+        [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
+        erl_syntax:operator('+'), MaxLenVar),
+    S7 = add_decode_step(4, [Field0, Field1, Field2, Field3], OffsetInc, S6),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:binary([
+            erl_syntax:binary_field(erl_syntax:underscore(),
+                erl_syntax:infix_expr(OffsetVar, erl_syntax:operator('*'),
+                    erl_syntax:integer(8)), []),
+            erl_syntax:binary_field(UnsplitVar, [erl_syntax:atom(binary)])
+            ]),
+        RestVar),
+    LenExpr = case T of
+        string ->
+            erl_syntax:infix_expr(LenVar,
+                erl_syntax:operator('-'), erl_syntax:integer(1));
+        binary ->
+            LenVar
+    end,
+    InnerField0 = erl_syntax:binary_field(SplitVar, LenExpr,
+        [erl_syntax:atom(binary)]),
+    InnerFields1 = case T of
+        string ->
+            [erl_syntax:binary_field(erl_syntax:integer(0))];
+        binary ->
+            []
+    end,
+    InnerField2 = erl_syntax:binary_field(erl_syntax:underscore(),
+        [erl_syntax:atom(binary)]),
+    Form1 = erl_syntax:match_expr(
+        erl_syntax:binary([InnerField0] ++ InnerFields1 ++ [InnerField2]),
+        UnsplitVar),
+    Form2 = case T of
+        string ->
+            erl_syntax:match_expr(
+                DstVar,
+                erl_syntax:application(erl_syntax:atom(binary_to_list),
+                    [SplitVar]));
+        binary ->
+            erl_syntax:match_expr(DstVar, SplitVar)
+    end,
+    add_forms([Form0, Form1, Form2], S7);
+
+decode_data(unicode, DstVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {MaxLenVar, S1} = inc_tvar(S0),
+    {RestVar, S2} = inc_tvar(S1),
+    {OffsetVar, S3} = inc_tvar(S2),
+    {LenVar, S4} = inc_tvar(S3),
+    {UnsplitVar, S5} = inc_tvar(S4),
+    {SplitVar, S6} = inc_tvar(S5),
+    Field0 = erl_syntax:binary_field(MaxLenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field1 = erl_syntax:binary_field(OffsetVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field2 = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field3 = erl_syntax:binary_field(RestVar, erl_syntax:infix_expr(
+        MaxLenVar, erl_syntax:operator('*'), erl_syntax:integer(2)),
+        [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
+        erl_syntax:operator('+'), erl_syntax:infix_expr(
+            MaxLenVar, erl_syntax:operator('*'), erl_syntax:integer(2))),
+    S7 = add_decode_step(4, [Field0, Field1, Field2, Field3], OffsetInc, S6),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:binary([
+            erl_syntax:binary_field(erl_syntax:underscore(),
+                erl_syntax:infix_expr(OffsetVar, erl_syntax:operator('*'),
+                    erl_syntax:integer(16)), []),
+            erl_syntax:binary_field(UnsplitVar, [erl_syntax:atom(binary)])
+            ]),
+        RestVar),
+    Form1 = erl_syntax:match_expr(
+        erl_syntax:binary([
+            erl_syntax:binary_field(SplitVar, erl_syntax:infix_expr(
+                erl_syntax:infix_expr(
+                    LenVar, erl_syntax:operator('-'), erl_syntax:integer(1)),
+                erl_syntax:operator('*'), erl_syntax:integer(2)),
+                [erl_syntax:atom(binary)]),
+            erl_syntax:binary_field(erl_syntax:integer(0),
+                erl_syntax:integer(16), [])
+            ]),
+        UnsplitVar),
+    Form2 = erl_syntax:match_expr(
+        DstVar,
+        erl_syntax:application(
+            erl_syntax:atom(unicode), erl_syntax:atom(characters_to_list),
+            [SplitVar, erl_syntax:tuple([
+                erl_syntax:atom(utf16), erl_syntax:atom(little)])])),
+    add_forms([Form0, Form1, Form2], S7);
+
+decode_data(varying_string, DstVar, S0 = #fstate{}) ->
+    Form = erl_syntax:match_expr(DstVar, erl_syntax:atom(undefined)),
+    add_forms([Form], S0);
+
+decode_data(boolean, DstVar, S0 = #fstate{}) ->
+    {TVar, S1} = inc_tvar(S0),
+    S2 = int_decode(8, unsigned, TVar, S1),
+    Form = erl_syntax:match_expr(DstVar,
+        erl_syntax:case_expr(TVar, [
+            erl_syntax:clause([erl_syntax:integer(0)], [],
+                [erl_syntax:atom(false)]),
+            erl_syntax:clause([erl_syntax:underscore()], [],
+                [erl_syntax:atom(true)])])),
+    add_forms([Form], S2);
+
+decode_data(PrimType, DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
+    case PrimType of
+        uint8   -> int_decode(8 , unsigned, DstVar, S0);
+        uint16  -> int_decode(16, unsigned, DstVar, S0);
+        uint32  -> int_decode(32, unsigned, DstVar, S0);
+        uint64  -> int_decode(64, unsigned, DstVar, S0);
+        int8    -> int_decode(8 , signed,   DstVar, S0);
+        int16   -> int_decode(16, signed,   DstVar, S0);
+        int32   -> int_decode(32, signed,   DstVar, S0);
+        int64   -> int_decode(64, signed,   DstVar, S0)
+    end;
+
+decode_data({fixed_binary, Len}, DstVar, S0 = #fstate{}) ->
+    Field = erl_syntax:binary_field(DstVar, erl_syntax:integer(Len),
+        [erl_syntax:atom(binary)]),
+    add_decode_step(1, [Field], Len, S0);
+
+decode_data({fixed_binary, Len, Align}, DstVar, S0 = #fstate{}) ->
+    Field = erl_syntax:binary_field(DstVar, erl_syntax:integer(Len),
+        [erl_syntax:atom(binary)]),
+    add_decode_step(Align, [Field], Len, S0);
+
+decode_data({fixed_array, Count, _Type}, DstVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx} = S0,
+    [{field, FName} | _] = Ctx,
+    DecodeFun = dec_fun(build_struct_path(S0) ++ ['_A', FName]),
+    {SV0, SV1, S1} = inc_svar(S0),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:tuple([DstVar, SV1]),
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(array_decode),
+            [erl_syntax:integer(Count), DecodeFun, SV0])),
+    S2 = add_forms([Form0], S1),
+    S2#fstate{obase = unknown};
+
+decode_data({conformant_array, _Type}, DstVar, S0 = #fstate{}) ->
+    % max has already been hoisted out
+    #fstate{ctx = Ctx, maxlens = ML} = S0,
+    #{Ctx := MaxLenVar} = ML,
+    [{field, FName} | _] = Ctx,
+    DecodeFun = dec_fun(build_struct_path(S0) ++ ['_A', FName]),
+    {SV0, SV1, S1} = inc_svar(S0),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:tuple([DstVar, SV1]),
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(array_decode),
+            [MaxLenVar, DecodeFun, SV0])),
+    S2 = add_forms([Form0], S1),
+    S2#fstate{obase = unknown};
+
+decode_data({varying_array, _Type}, DstVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    #fstate{ctx = Ctx} = S0,
+    [{field, FName} | _] = Ctx,
+    DecodeFun = dec_fun(build_struct_path(S0) ++ ['_A', FName]),
+    {LenVar, S1} = inc_tvar(S0),
+    Field = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S2 = add_decode_step(4, [Field], 4, S1),
+    {SV0, SV1, S3} = inc_svar(S2),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:tuple([DstVar, SV1]),
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(array_decode),
+            [LenVar, DecodeFun, SV0])),
+    S4 = add_forms([Form0], S3),
+    S4#fstate{obase = unknown};
+
+decode_data({array, _Type}, DstVar, S0 = #fstate{opts = Opts}) ->
+    % max has already been hoisted out
+    Endian = maps:get(endian, Opts, big),
+    #fstate{ctx = Ctx, maxlens = ML} = S0,
+    #{Ctx := MaxLenVar} = ML,
+    [{field, FName} | _] = Ctx,
+    DecodeFun = dec_fun(build_struct_path(S0) ++ ['_A', FName]),
+    {OffsetVar, S1} = inc_tvar(S0),
+    {LenVar, S2} = inc_tvar(S1),
+    {UnsplitVar, S3} = inc_tvar(S2),
+
+    % offset
+    Field0 = erl_syntax:binary_field(OffsetVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    % actual count
+    Field1 = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S4 = add_decode_step(4, [Field0, Field1], 8, S3),
+
+    {SV0, SV1, S5} = inc_svar(S4),
+    Form0 = erl_syntax:match_expr(
+        erl_syntax:tuple([UnsplitVar, SV1]),
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(array_decode),
+            [MaxLenVar, DecodeFun, SV0])),
+    StartExpr = erl_syntax:infix_expr(OffsetVar, erl_syntax:operator('+'),
+        erl_syntax:integer(1)),
+    Form1 = erl_syntax:match_expr(DstVar,
+        erl_syntax:application(
+            erl_syntax:atom(lists), erl_syntax:atom(sublist),
+            [UnsplitVar, StartExpr, LenVar])),
+    S6 = add_forms([Form0, Form1], S5),
+    S6#fstate{obase = unknown};
+
+decode_data(Type = {pointer, RefType}, DstVar, S0 = #fstate{}) ->
+    S1 = add_decode_step(type_align(Type), [], 0, S0),
+    {SV0, SV1, S2} = inc_svar(S1),
+    {Fun, ErrName} = case RefType of
+        {struct, RefStruct, _} ->
+            {dec_fun(build_struct_path(push_struct(RefStruct, S2))),
+             RefStruct};
+        _Other ->
+            #fstate{ctx = [{field, FName} | _]} = S0,
+            {dec_fun(build_struct_path(S2) ++ ['_F', FName]),
+             FName}
+    end,
+    Form = erl_syntax:match_expr(
+        erl_syntax:tuple([DstVar, SV1]),
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(read_ptr),
+            [erl_syntax:atom(ErrName),
+             erl_syntax:integer(type_align(RefType)),
+             Fun, SV0])),
+    add_forms([Form], 4, S2);
+
+decode_data(Type = {struct, Record, Fields}, DstVar, S0 = #fstate{}) ->
+    Align = type_align(Type),
+    S1 = push_struct(Record, S0),
+    #fstate{ctx = Ctx, unpacks = U} = S1,
+    #{Ctx := FieldMap} = U,
+    S2 = add_decode_step(Align, [], 0, S1),
+    S3 = lists:foldl(fun ({FName, FType}, SS0) ->
+        #{FName := FVar} = FieldMap,
+        SS1 = push_field(FName, SS0),
+        SS2 = decode_data(FType, FVar, SS1),
+        pop_field(SS2)
+    end, S2, Fields),
+    pop_struct(S3).
+
+decode_packs({custom, Base, _E, _D}, DstVar, S0 = #fstate{}) ->
+    decode_packs(Base, DstVar, S0);
+decode_packs({struct, Record, Fields}, DstVar, S0 = #fstate{}) ->
+    S1 = push_struct(Record, S0),
+    #fstate{ctx = Ctx, unpacks = U} = S1,
+    #{Ctx := FieldMap} = U,
+    FieldExprs = maps:fold(fun (FName, FVar, Acc) ->
+        [erl_syntax:record_field(
+            erl_syntax:atom(FName),
+            FVar) | Acc]
+    end, [], FieldMap),
+    PackForm = erl_syntax:match_expr(
+        DstVar,
+        erl_syntax:record_expr(erl_syntax:atom(Record), FieldExprs)),
+    S2 = lists:foldl(fun ({FName, FType}, SS0) ->
+        #{FName := FVar} = FieldMap,
+        SS1 = push_field(FName, SS0),
+        SS2 = decode_packs(FType, FVar, SS1),
+        pop_field(SS2)
+    end, S1, Fields),
+    S3 = add_forms([PackForm], S2),
+    pop_struct(S3);
+decode_packs(_Type, _DstVar, S0 = #fstate{}) ->
+    S0.
+
+decode_hoists({custom, Base, _E, _D}, DstVar, S0 = #fstate{}) ->
+    decode_hoists(Base, DstVar, S0);
+decode_hoists(PrimType, _DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
+    S0;
+decode_hoists({fixed_string, _N}, _DstVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({fixed_binary, _N}, _DstVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({fixed_binary, _N, _A}, _DstVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({conformant_array, _Type}, _DstVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {TVar, S1} = inc_tvar(S0),
+    Field = erl_syntax:binary_field(TVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S2 = add_decode_step(4, [Field], 4, S1),
+    #fstate{ctx = Ctx, maxlens = ML0} = S2,
+    ML1 = ML0#{Ctx => TVar},
+    S2#fstate{maxlens = ML1};
+decode_hoists({array, _Type}, _DstVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {TVar, S1} = inc_tvar(S0),
+    Field = erl_syntax:binary_field(TVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    S2 = add_decode_step(4, [Field], 4, S1),
+    #fstate{ctx = Ctx, maxlens = ML0} = S2,
+    ML1 = ML0#{Ctx => TVar},
+    S2#fstate{maxlens = ML1};
+decode_hoists({fixed_array, _N, _Type}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({varying_array, _Type}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({pointer, _RefType}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({struct, Record, Fields}, _DstVar, S0 = #fstate{}) ->
+    S1 = push_struct(Record, S0),
+    {FieldMap, S2} = lists:foldl(fun ({FName, _FType}, {M0, SS0}) ->
+        {FVar, SS1} = inc_tvar(SS0),
+        M1 = M0#{FName => FVar},
+        {M1, SS1}
+    end, {#{}, S1}, Fields),
+    #fstate{ctx = Ctx, unpacks = U0} = S1,
+    U1 = U0#{Ctx => FieldMap},
+    S3 = S2#fstate{unpacks = U1},
+    S4 = lists:foldl(fun ({FName, FType}, SS0) ->
+        #{FName := FVar} = FieldMap,
+        SS1 = push_field(FName, SS0),
+        SS2 = decode_hoists(FType, FVar, SS1),
+        pop_field(SS2)
+    end, S3, Fields),
+    pop_struct(S4).
+
+decode_finish({custom, Base, _E, Dec}, SrcVar, DstVar, S0 = #fstate{}) ->
+    {TVar, S1} = inc_tvar(S0),
+    S2 = decode_finish(Base, SrcVar, TVar, S1),
+    Form = erl_syntax:match_expr(DstVar,
+        erl_syntax:application(Dec, [TVar])),
+    add_forms([Form], S2);
+
+decode_finish({ArrType, _MembType}, SrcVar, DstVar, S0 = #fstate{})
+        when (ArrType =:= array) or (ArrType =:= fixed_array) or
+             (ArrType =:= conformant_array) or (ArrType =:= varying_array) ->
+    #fstate{ctx = [{field, FName} | _]} = S0,
+    Fun = finish_fun_name(build_struct_path(S0) ++ ['_A', FName]),
+    {SV, _} = cur_svar(S0),
+    {TVar, S1} = inc_tvar(S0),
+    Form = erl_syntax:match_expr(DstVar,
+        erl_syntax:list_comp(
+            erl_syntax:application(Fun, [TVar, SV]),
+            [erl_syntax:generator(TVar, SrcVar)])),
+    add_forms([Form], S1);
+
+decode_finish({pointer, RefType}, SrcVar, DstVar, S0 = #fstate{}) ->
+    {TmpVar, S1} = inc_tvar(S0),
+    {SV, _} = cur_svar(S1),
+    {Fun, ErrName} = case RefType of
+        {struct, RefStruct, _} ->
+            {finish_fun_name(build_struct_path(push_struct(RefStruct, S1))),
+             RefStruct};
+        _Other ->
+            #fstate{ctx = [{field, FName} | _]} = S0,
+            {finish_fun_name(build_struct_path(S1) ++ ['_F', FName]),
+             FName}
+    end,
+    GetValForm = erl_syntax:match_expr(TmpVar,
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(get_ptr_val),
+            [erl_syntax:atom(ErrName), SrcVar, SV])),
+    ProcessForm = erl_syntax:match_expr(DstVar,
+        erl_syntax:application(Fun,
+            [TmpVar, SV])),
+    add_forms([GetValForm, ProcessForm], S1);
+
+decode_finish({struct, Record, Fields}, SrcVar, DstVar, S0 = #fstate{}) ->
+    S1 = push_struct(Record, S0),
+    {FieldMapRev, S2} = lists:foldl(fun ({FName, FType}, {M0, SS0}) ->
+        {FSrcVar, SS1} = inc_tvar(SS0),
+        {FDstVar, SS2} = inc_tvar(SS1),
+        M1 = [{FName, FType, FSrcVar, FDstVar} | M0],
+        {M1, SS2}
+    end, {[], S1}, Fields),
+    FieldMap = lists:reverse(FieldMapRev),
+    FieldUnpackExprs = lists:map(fun ({FName, _FType, FSrcVar, _FDstVar}) ->
+        erl_syntax:record_field(
+            erl_syntax:atom(FName),
+            FSrcVar)
+    end, FieldMap),
+    FieldPackExprs = lists:map(fun ({FName, _FType, _FSrcVar, FDstVar}) ->
+        erl_syntax:record_field(
+            erl_syntax:atom(FName),
+            FDstVar)
+    end, FieldMap),
+    UnpackForm = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(Record), FieldUnpackExprs),
+        SrcVar),
+    PackForm = erl_syntax:match_expr(
+        DstVar,
+        erl_syntax:record_expr(erl_syntax:atom(Record), FieldPackExprs)),
+    #fstate{forms = F0} = S2,
+    S3 = S2#fstate{forms = F0 ++ [UnpackForm]},
+    S4 = lists:foldl(fun ({FName, FType, FSrcVar, FDstVar}, SS0) ->
+        SS1 = push_field(FName, SS0),
+        SS2 = decode_finish(FType, FSrcVar, FDstVar, SS1),
+        pop_field(SS2)
+    end, S3, FieldMap),
+    S5 = add_forms([PackForm], S4),
+    pop_struct(S5);
+
+decode_finish(Type, SrcVar, DstVar, S0 = #fstate{forms = F0}) ->
+    Form = erl_syntax:match_expr(DstVar, SrcVar),
+    add_forms([Form], S0).
+
+-spec decode_struct_func_form(type_path(), rpce_type(), loc(), options()) -> [form()].
+decode_struct_func_form(Path0, Type, Loc, Opts) ->
+    Ctx0 = lists:foldl(fun (Struct, Acc) ->
+        [{struct, Struct} | Acc]
+    end, [], Path0),
+    {FunName, Ctx1} = case (catch lists:last(Path0)) of
+        {'EXIT', _} ->
+            {struct, RecName, _} = Type,
+            {dec_fun_name(Path0 ++ [RecName]), Ctx0};
+        {scalar_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {dec_fun_name(P ++ ['_F', FieldName]), [{field, FieldName} | C]};
+        {array_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {dec_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        _ ->
+            {struct, RecName, _} = Type,
+            {dec_fun_name(Path0 ++ [RecName]), Ctx0}
+    end,
+    io:format("func_form(~9999p, ~99999p) -> ~999999p (~99999p)\n", [Path0, Type, FunName, Ctx1]),
+    S0 = #fstate{ctx = Ctx1, opts = Opts},
+    OutVar = erl_syntax:variable('Output'),
+    SV0 = svar(0),
+    S1 = decode_hoists(Type, OutVar, S0),
+    S2 = decode_data(Type, OutVar, S1),
+    S3 = decode_packs(Type, OutVar, S2),
+    S4 = close_dblk(S3),
+    #fstate{forms = Forms, sn = SN1} = S4,
+    SV1 = svar(SN1),
+    F0 = erl_syntax:function(
+        FunName,
+        [erl_syntax:clause([SV0], [],
+            Forms ++ [erl_syntax:tuple([OutVar, SV1])])]),
+    F1 = erl_syntax:revert(F0),
+    erl_parse:map_anno(fun (_) ->
+        erl_anno:set_generated(true, Loc)
+    end, F1).
+
+-spec decode_finish_func_form(type_path(), rpce_type(), loc(), options()) -> [form()].
+decode_finish_func_form(Path0, Type, Loc, Opts) ->
+    Ctx0 = lists:foldl(fun (Struct, Acc) ->
+        [{struct, Struct} | Acc]
+    end, [], Path0),
+    {FunName, Ctx1} = case (catch lists:last(Path0)) of
+        {'EXIT', _} ->
+            {struct, RecName, _} = Type,
+            {finish_fun_name(Path0 ++ [RecName]), Ctx0};
+        {scalar_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {finish_fun_name(P ++ ['_F', FieldName]), [{field, FieldName} | C]};
+        {array_field, FieldName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {finish_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        _ ->
+            {struct, RecName, _} = Type,
+            {finish_fun_name(Path0 ++ [RecName]), Ctx0}
+    end,
+    S0 = #fstate{ctx = Ctx1, opts = Opts},
+    InVar = erl_syntax:variable('Input'),
+    OutVar = erl_syntax:variable('Output'),
+    SV0 = svar(0),
+    S1 = decode_finish(Type, InVar, OutVar, S0),
+    #fstate{forms = Forms} = S1,
+    F0 = erl_syntax:function(
+        FunName,
+        [
+            erl_syntax:clause([erl_syntax:atom(undefined),
+                erl_syntax:underscore()], [],
+                [erl_syntax:atom(undefined)]),
+            erl_syntax:clause([InVar, SV0], [],
+                Forms ++ [OutVar])
+        ]),
+    F1 = erl_syntax:revert(F0),
+    erl_parse:map_anno(fun (_) ->
+        erl_anno:set_generated(true, Loc)
+    end, F1).
+
+decode_func_form({struct, RecName, _}, Loc) ->
+    InVar = erl_syntax:variable('Input'),
+    FF0 = erl_syntax:match_expr(svar(0),
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(mode),
+                erl_syntax:atom(decode)),
+             erl_syntax:record_field(erl_syntax:atom(data),
+                InVar)])),
+    FF1 = erl_syntax:match_expr(
+        erl_syntax:tuple([tvar(0), svar(1)]),
+        erl_syntax:application(dec_fun_name([RecName]),
+            [svar(0)])),
+    FF2 = erl_syntax:match_expr(svar(2), erl_syntax:application(
+        erl_syntax:atom(msrpce_runtime), erl_syntax:atom(finish),
+        [svar(1)])),
+    FF3 = erl_syntax:application(
+        finish_fun_name([RecName]),
+        [tvar(0), svar(2)]),
+    F0 = erl_syntax:function(
+        concat_atoms([decode, RecName]),
+        [erl_syntax:clause([InVar], [], [FF0, FF1, FF2, FF3])]),
+    F1 = erl_syntax:revert(F0),
+    erl_parse:map_anno(fun (_) ->
+        erl_anno:set_generated(true, Loc)
+    end, F1).
+
+% make_forms([]) -> [];
+% make_forms(Tokens) ->
+%     {BeforeDot, AfterDot0} = lists:splitwith(fun
+%         ({dot, _}) -> false;
+%         (_) -> true
+%     end, Tokens),
+%     [Dot = {dot, _} | AfterDot1] = AfterDot0,
+%     {ok, Form} = erl_parse:parse_form(BeforeDot ++ [Dot]),
+%     [Form | make_forms(AfterDot1)].
+
+% compile_module(Name, Type, Opts) ->
+%     ModName = binary_to_atom(iolist_to_binary([
+%         "msrpce_dyn_", integer_to_binary(erlang:unique_integer([positive]))
+%         ])),
+%     RecordsPath = code:lib_dir(msrpce) ++ "/include/records.hrl",
+%     {ok, Data} = file:read_file(RecordsPath),
+%     {ok, RecTokens, _} = erl_scan:string(
+%         unicode:characters_to_list(Data, utf8)),
+%     RecForms = make_forms(RecTokens),
+%     NameStr = atom_to_list(Name),
+%     DecodeName = list_to_atom("decode_" ++ NameStr),
+%     EncodeName = list_to_atom("encode_" ++ NameStr),
+%     ModHeaderForms = [
+%         {attribute, 1, module, ModName},
+%         {attribute, 1, export, [{EncodeName, 1}, {DecodeName, 1}]}],
+%     EncodeForm = encode_func_form(EncodeName, Type, 2, Opts),
+%     DecodeForm = decode_func_form(DecodeName, Type, 2, Opts),
+%     Forms = ModHeaderForms ++ RecForms ++ [EncodeForm, DecodeForm],
+%     case compile:forms(Forms, [return_errors]) of
+%         {ok, Mod, Bin} ->
+%             {module, Mod} = code:load_binary(Mod, "msrpce_dynamic", Bin),
+%             {ok, Mod};
+%         {ok, Mod, Bin, _Warnings} ->
+%             {module, Mod} = code:load_binary(Mod, "msrpce_dynamic", Bin),
+%             {ok, Mod};
+%         {error, [{_, Errs}], _Warnings} ->
+%             FormatErrs = lists:map(fun ({_Loc, _Mod, Desc}) ->
+%                 compile:format_error(Desc)
+%             end, Errs),
+%             {error, iolist_to_binary(FormatErrs)}
+%     end.

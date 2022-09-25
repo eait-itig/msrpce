@@ -30,8 +30,7 @@
 
 -record(?MODULE, {
     opts :: [term()],
-    utypes = #{} :: #{atom() => term()},
-    records = #{} :: #{atom() => term()}
+    compiler :: msrpce_compiler:state()
     }).
 
 -spec parse_transform_info() -> #{'error_location' => 'column' | 'line'}.
@@ -41,13 +40,197 @@ parse_transform_info() ->
 -spec parse_transform([erl_parse:abstract_form()], [compile:option()]) ->
     [erl_parse:abstract_form()].
 parse_transform(Forms, Options) ->
-    S0 = #?MODULE{opts = Options},
+    S0 = #?MODULE{opts = Options, compiler = msrpce_compiler:new()},
     transform_all(Forms, S0).
 
 transform_all([], _) -> [];
 transform_all([Form0 | Rest], S0 = #?MODULE{}) ->
-    {Forms1, S1} = transform(Form0, S0),
+    {Forms1, S1} = transform(erl_syntax:type(Form0), Form0, S0),
     Forms1 ++ transform_all(Rest, S1).
 
-transform(Other, S0) ->
-    {[Other], S0}.
+transform(attribute, Form, S0 = #?MODULE{}) ->
+    case erl_syntax:atom_value(erl_syntax:attribute_name(Form)) of
+        record ->
+            S1 = add_record(Form, S0),
+            {[Form], S1};
+        type ->
+            S1 = add_type(Form, S0),
+            {[Form], S1};
+        rpce ->
+            transform_opts(Form, S0);
+        rpce_struct ->
+            transform_struct(Form, S0);
+        _Other ->
+            {[Form], S0}
+    end;
+transform(eof_marker, Form, S0 = #?MODULE{compiler = C0}) ->
+    FuncForms = msrpce_compiler:func_forms(C0),
+    lists:foreach(fun (FForm) ->
+        io:format("~s\n", [erl_pp:form(FForm)])
+    end, FuncForms),
+    {FuncForms ++ [Form], S0};
+transform(Type, Form, S0) ->
+    {[Form], S0}.
+
+add_record(Form, S0 = #?MODULE{compiler = C0}) ->
+    [RecNameTree, RecFieldsTup] = erl_syntax:attribute_arguments(Form),
+    RecFields = erl_syntax:tuple_elements(RecFieldsTup),
+    RecName = erl_syntax:atom_value(RecNameTree),
+    FieldTypes = lists:map(fun (FieldType) ->
+        FieldNameTree = erl_syntax:typed_record_field_body(FieldType),
+        FieldName = erl_syntax:atom_value(
+            erl_syntax:record_field_name(FieldNameTree)),
+        T = erl_syntax:typed_record_field_type(FieldType),
+        case (catch type_to_msrpce_type(T)) of
+            {'EXIT', Why} ->
+                {FieldName, {untranslatable_type, T}};
+            RpceType ->
+                {FieldName, RpceType}
+        end
+    end, RecFields),
+    Type = {struct, RecName, FieldTypes},
+    {ok, C1} = msrpce_compiler:define_type(RecName, Type, C0),
+    S0#?MODULE{compiler = C1}.
+
+type_to_msrpce_type(Form) ->
+    case erl_syntax:type(Form) of
+        record_type ->
+            erl_syntax:atom_value(
+                erl_syntax:record_type_name(Form));
+        user_type_application ->
+            Name = erl_syntax:atom_value(
+                erl_syntax:user_type_application_name(Form)),
+            case Name of
+                fixed_array ->
+                    [N, RefType] =
+                        erl_syntax:user_type_application_arguments(Form),
+                    {fixed_array, erl_syntax:integer_value(N),
+                        type_to_msrpce_type(RefType)};
+                ReferenceType when (ReferenceType =:= conformant_array) or
+                                   (ReferenceType =:= varying_array) or
+                                   (ReferenceType =:= array) or
+                                   (ReferenceType =:= pointer) ->
+                    [RefType] =
+                        erl_syntax:user_type_application_arguments(Form),
+                    {ReferenceType, type_to_msrpce_type(RefType)};
+                fixed_str ->
+                    [N] = erl_syntax:user_type_application_arguments(Form),
+                    {fixed_string, erl_syntax:integer_value(N)};
+                fixed_bin ->
+                    [N] = erl_syntax:user_type_application_arguments(Form),
+                    {fixed_binary, erl_syntax:integer_value(N)};
+                aligned_bin ->
+                    [N, A] = erl_syntax:user_type_application_arguments(Form),
+                    {fixed_binary, erl_syntax:integer_value(N),
+                        erl_syntax:integer_value(A)};
+                _ ->
+                    Name
+            end;
+        type_application ->
+            Qualified = erl_syntax:type_application_name(Form),
+            case erl_syntax:type(Qualified) of
+                module_qualifier ->
+                    Module = erl_syntax:atom_value(
+                        erl_syntax:module_qualifier_argument(Qualified)),
+                    Type = erl_syntax:atom_value(
+                        erl_syntax:module_qualifier_body(Qualified)),
+                    case {Module, Type} of
+                        {msrpce, fixed_array} ->
+                            [N, RefType] =
+                                erl_syntax:type_application_arguments(Form),
+                            {fixed_array, erl_syntax:integer_value(N),
+                                type_to_msrpce_type(RefType)};
+
+                        {msrpce, RType} when (RType =:= conformant_array) or
+                                             (RType =:= varying_array) or
+                                             (RType =:= array) or
+                                             (RType =:= pointer) ->
+                            [RefType] =
+                                erl_syntax:type_application_arguments(Form),
+                            {RType, type_to_msrpce_type(RefType)};
+
+                        {msrpce, str} -> string;
+                        {msrpce, bin} -> binary;
+                        {msrpce, varying_str} -> varying_string;
+                        {msrpce, varying_bin} -> varying_binary;
+                        {msrpce, fixed_str} ->
+                            [N] = erl_syntax:type_application_arguments(Form),
+                            {fixed_string, erl_syntax:integer_value(N)};
+                        {msrpce, fixed_bin} ->
+                            [N] = erl_syntax:type_application_arguments(Form),
+                            {fixed_binary, erl_syntax:integer_value(N)};
+                        {msrpce, aligned_bin} ->
+                            [N, A] = erl_syntax:type_application_arguments(Form),
+                            {fixed_binary, erl_syntax:integer_value(N),
+                                erl_syntax:integer_value(A)};
+
+                        {msrpce, custom} ->
+                            [BaseType, _RealType, Enc, Dec] =
+                                erl_syntax:type_application_arguments(Form),
+                            {custom, type_to_msrpce_type(BaseType), Enc, Dec};
+                        {msrpce, builtin} ->
+                            [BaseType, _RealType, Enc, Dec] =
+                                erl_syntax:type_application_arguments(Form),
+                            EncQ = erl_syntax:module_qualifier(
+                                erl_syntax:atom(msrpce), Enc),
+                            DecQ = erl_syntax:module_qualifier(
+                                erl_syntax:atom(msrpce), Dec),
+                            {custom, type_to_msrpce_type(BaseType), EncQ, DecQ};
+
+                        {msrpce, Primitive} when (Primitive =:= uint8) or
+                                                 (Primitive =:= boolean) or
+                                                 (Primitive =:= uint16) or
+                                                 (Primitive =:= uint32) or
+                                                 (Primitive =:= uint64) or
+                                                 (Primitive =:= int8) or
+                                                 (Primitive =:= int16) or
+                                                 (Primitive =:= int32) or
+                                                 (Primitive =:= int64) or
+                                                 (Primitive =:= unicode) ->
+                            Primitive;
+                        _ ->
+                            error(unknown_type)
+                    end;
+                atom ->
+                    erl_syntax:atom_value(Qualified)
+            end;
+        _ ->
+            error(unknown_type)
+    end.
+
+add_type(Form, S0 = #?MODULE{compiler = C0}) ->
+    [TypeDefAbs] = erl_syntax:attribute_arguments(Form),
+    {Name, TypeDef, _Args} = erl_syntax:concrete(TypeDefAbs),
+    case (catch type_to_msrpce_type(TypeDef)) of
+        {'EXIT', _Why} ->
+            io:format("unsupported typedef for ~s\n", [Name]),
+            S0;
+        Type ->
+            {ok, C1} = msrpce_compiler:define_type(Name, Type, C0),
+            S0#?MODULE{compiler = C1}
+    end.
+
+transform_struct(Form, S0 = #?MODULE{compiler = C0}) ->
+    [ArgsAbs] = erl_syntax:attribute_arguments(Form),
+    case erl_syntax:concrete(ArgsAbs) of
+        {TypeName, Opts0} when is_atom(TypeName) and is_map(Opts0) ->
+            Loc = erl_syntax:get_pos(Form),
+            Opts1 = Opts0#{location => Loc},
+            {ok, C1} = msrpce_compiler:compile_type(TypeName, Opts1, C0),
+            {[], S0#?MODULE{compiler = C1}};
+
+        TypeName when is_atom(TypeName) ->
+            Loc = erl_syntax:get_pos(Form),
+            Opts = #{location => Loc},
+            {ok, C1} = msrpce_compiler:compile_type(TypeName, Opts, C0),
+            {[], S0#?MODULE{compiler = C1}};
+
+        Args ->
+            error({badarg, rpce_struct, Args})
+    end.
+
+transform_opts(Form, S0 = #?MODULE{compiler = C0}) ->
+    [ArgsAbs] = erl_syntax:attribute_arguments(Form),
+    Opts = erl_syntax:concrete(ArgsAbs),
+    C1 = msrpce_compiler:set_options(Opts, C0),
+    {[], S0#?MODULE{compiler = C1}}.
