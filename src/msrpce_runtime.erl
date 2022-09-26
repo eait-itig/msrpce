@@ -92,12 +92,13 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
         <<Ref:32/big-unsigned, D1/binary>> ->
             case Ref of
                 0 ->
-                    {#msrpce_ptr{referent = 0}, S0#msrpce_state{data = D1}};
+                    {#msrpce_ptr{referent = 0},
+                     S0#msrpce_state{data = D1, offset = O0 + 4}};
                 _ ->
                     case Refs0 of
                         #{Ref := #msrpce_defer{typename = TypeName}} ->
                             {#msrpce_ptr{referent = Ref},
-                             S0#msrpce_state{data = D1}};
+                             S0#msrpce_state{data = D1, offset = O0 + 4}};
                         _ ->
                             Defer = #msrpce_defer{referent = Ref,
                                                   typename = TypeName,
@@ -107,7 +108,8 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
                             RefSet1 = gb_sets:add_element(Ref, RefSet0),
                             {#msrpce_ptr{referent = Ref},
                              S0#msrpce_state{data = D1, defer_by_ref = Refs1,
-                                             referents = RefSet1}}
+                                             referents = RefSet1,
+                                             offset = O0 + 4}}
                     end
             end;
         _ ->
@@ -115,10 +117,12 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
     end.
 
 -spec write_ptr(typename(), bytes(), encoder(), term(), state()) -> state().
-write_ptr(_TypeName, _Align, _Func, undefined, S0 = #msrpce_state{data = D0}) ->
+write_ptr(_TypeName, _Align, _Func, undefined, S0 = #msrpce_state{data = D0,
+                                                                  offset = O0}) ->
     D1 = <<D0/binary, 0:32>>,
-    S0#msrpce_state{data = D1};
+    S0#msrpce_state{data = D1, offset = O0 + 4};
 write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
+                                                       offset = O0,
                                                        defer_by_ref = Refs0,
                                                        defer_by_val = Vals0,
                                                        referents = RefSet0}) ->
@@ -126,7 +130,7 @@ write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
     case Vals0 of
         #{V := Ref} ->
             D1 = <<D0/binary, Ref:32/big-unsigned>>,
-            S0#msrpce_state{data = D1};
+            S0#msrpce_state{data = D1, offset = O0 + 4};
         _ ->
             Ref = maps:size(Refs0) + 1,
             Defer = #msrpce_defer{referent = Ref,
@@ -138,7 +142,7 @@ write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
             Vals1 = Vals0#{V => Ref},
             RefSet1 = gb_sets:add_element(Ref, RefSet0),
             D1 = <<D0/binary, Ref:32/big-unsigned>>,
-            S0#msrpce_state{data = D1, defer_by_ref = Refs1,
+            S0#msrpce_state{data = D1, defer_by_ref = Refs1, offset = O0 + 4,
                             defer_by_val = Vals1, referents = RefSet1}
     end.
 

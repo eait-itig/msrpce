@@ -73,9 +73,9 @@ transform(attribute, Form, S0 = #?MODULE{}) ->
     end;
 transform(eof_marker, Form, S0 = #?MODULE{compiler = C0}) ->
     FuncForms = msrpce_compiler:func_forms(C0),
-    %lists:foreach(fun (FForm) ->
-    %  io:format("~s\n", [erl_pp:form(FForm)])
-    %end, lists:reverse(FuncForms)),
+    lists:foreach(fun (FForm) ->
+      io:format("~s\n", [erl_pp:form(FForm)])
+    end, lists:reverse(FuncForms)),
     {FuncForms ++ [Form], S0};
 transform(_Type, Form, S0) ->
     {[Form], S0}.
@@ -173,6 +173,17 @@ type_to_msrpce_type(Form) ->
                             [N, A] = erl_syntax:type_application_arguments(Form),
                             {fixed_binary, erl_syntax:integer_value(N),
                                 erl_syntax:integer_value(A)};
+
+                        {msrpce, bitset} ->
+                            [BaseType, _BitNameUnion, BitMapType] =
+                                erl_syntax:type_application_arguments(Form),
+                            Fields = erl_syntax:map_type_fields(BitMapType),
+                            BitMap = [{erl_syntax:atom_value(
+                                erl_syntax:map_type_assoc_name(X)),
+                              erl_syntax:integer_value(
+                                erl_syntax:map_type_assoc_value(X))}
+                              || X <- Fields],
+                            {bitset, type_to_msrpce_type(BaseType), BitMap};
 
                         {msrpce, custom} ->
                             [BaseType, _RealType, Enc, Dec] =

@@ -191,8 +191,15 @@ ensure_structs([Struct | Rest], TOpts, S0 = #?MODULE{sgen = SG0}) ->
 func_forms(#?MODULE{funcs = F0}) ->
     F0.
 
+tpdedupe(PathTypes) -> tpdedupe(PathTypes, #{}).
+
+tpdedupe([], Map0) -> maps:to_list(Map0);
+tpdedupe([{Path, Type} | Rest], Map0) ->
+    Map1 = Map0#{Path => Type},
+    tpdedupe(Rest, Map1).
+
 -spec get_deferred_types(rpce_type()) -> [{type_path(), rpce_type()}].
-get_deferred_types(Type) -> get_deferred_types(Type, [], base).
+get_deferred_types(Type) -> tpdedupe(get_deferred_types(Type, [], base)).
 
 -spec get_deferred_types(rpce_type(), type_path(), atom()) -> [type_path()].
 get_deferred_types({custom, Base, _E, _D}, Path0, Name) ->
@@ -750,7 +757,9 @@ encode_data(unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
     F2 = erl_syntax:binary_field(erl_syntax:integer(0),
         erl_syntax:integer(32), []),
     % actual count = string:length(Input) + 1
-    F3 = erl_syntax:binary_field(LenExpr,
+    F3 = erl_syntax:binary_field(erl_syntax:application(
+            erl_syntax:atom(string), erl_syntax:atom(length),
+            [SrcVar]),
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % string data
     F4 = erl_syntax:binary_field(TVar, [erl_syntax:atom(binary)]),
@@ -1119,12 +1128,10 @@ decode_data(unicode, DstVar, S0 = #fstate{opts = Opts}) ->
     Form1 = erl_syntax:match_expr(
         erl_syntax:binary([
             erl_syntax:binary_field(SplitVar, erl_syntax:infix_expr(
-                erl_syntax:infix_expr(
-                    LenVar, erl_syntax:operator('-'), erl_syntax:integer(1)),
-                erl_syntax:operator('*'), erl_syntax:integer(2)),
+                LenVar, erl_syntax:operator('*'), erl_syntax:integer(2)),
                 [erl_syntax:atom(binary)]),
-            erl_syntax:binary_field(erl_syntax:integer(0),
-                erl_syntax:integer(16), [])
+            erl_syntax:binary_field(erl_syntax:underscore(),
+                [erl_syntax:atom(binary)])
             ]),
         UnsplitVar),
     Form2 = erl_syntax:match_expr(

@@ -38,7 +38,8 @@
     ]).
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
-    int8/0, int16/0, int32/0, int64/0
+    int8/0, int16/0, int32/0, int64/0,
+    bitset/3, bitslice/3
     ]).
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
@@ -94,6 +95,16 @@
 
 -type builtin(_Base, RealType, _Encoder, _Decoder) :: RealType.
 %% An extension type defined in the <code>msrpce</code> module.
+
+-type bitset(_Base, BitName, _BitMap) :: #{BitName => boolean()}.
+%% An integer which is made up of bits, each representing a boolean flag.
+%% The Base type should be one of the unsigned integer types
+%% (<code>msrpce:uint*</code>). BitName is a union of all possible bit
+%% names. BitMap is a map of the form
+%% <code>#{BitName => BitNumber :: integer()}</code>, where
+%% <code>BitNumber</code> is 0 for LSB.
+
+-type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 
 -type bin() :: binary().
 %% A conformant-varying binary string, with no terminator. Conformant string
@@ -168,15 +179,17 @@ decode_filetime(<<V:64/little>>) ->
 -spec encode_rpc_unicode(string()) -> #msrpce_unicode_string{}.
 encode_rpc_unicode(String) ->
     Len = string:len(String),
-    #msrpce_unicode_string{len = Len,
-                           maxlen = Len + 1,
+    #msrpce_unicode_string{len = Len * 2,
+                           maxlen = Len * 2,
                            str = String}.
 
 -spec decode_rpc_unicode(#msrpce_unicode_string{}) -> string().
+decode_rpc_unicode(#msrpce_unicode_string{len = 0, maxlen = 0, str = _}) ->
+    "";
 decode_rpc_unicode(R = #msrpce_unicode_string{len = L, maxlen = MaxL, str = S0}) ->
     case string:len(S0) of
-        V when (V =< MaxL) and (V >= L) ->
-            string:slice(S0, 0, L);
+        V when (V * 2 =< MaxL) and (V * 2 >= L) ->
+            string:slice(S0, 0, L div 2);
         _ ->
             error({bad_rpc_unicode, R})
     end.
