@@ -64,7 +64,7 @@
 -type varying_str() :: msrpce:varying_str().
 -type unicode() :: msrpce:unicode().
 
--type uuid() :: msrpce:fixed_bin(16).
+-type uuid() :: msrpce:uuid().
 
 -type sid() :: msrpce:builtin(
     #msrpce_sid{},

@@ -34,7 +34,11 @@
     get_ptr_val/3,
     finish/1,
     align/2,
-    array_decode/3
+    array_decode/3,
+    write_privhdr_v1/3,
+    write_privhdr_v2/3,
+    read_privhdr_v1/2,
+    read_privhdr_v2/2
     ]).
 
 -export_type([
@@ -174,3 +178,41 @@ finish(S0 = #msrpce_state{defer_by_ref = Refs0, referents = RefSet0}) ->
             S3 = S2#msrpce_state{defer_by_ref = Refs2},
             finish(S3)
     end.
+
+write_privhdr_v1(Fun, Input, S0 = #msrpce_state{}) ->
+    S1 = align(8, S0),
+    #msrpce_state{data = D0, offset = O0} = S1,
+    S2 = S1#msrpce_state{data = <<>>, offset = O0 + 8},
+    S3 = finish(Fun(Input, S2)),
+    S4 = align(8, S3),
+    #msrpce_state{data = DD} = S4,
+    D1 = iolist_to_binary([D0, <<(byte_size(DD)):32/little, 0:32>>, DD]),
+    S4#msrpce_state{data = D1}.
+
+write_privhdr_v2(Fun, Input, S0 = #msrpce_state{}) ->
+    S1 = align(16, S0),
+    #msrpce_state{data = D0, offset = O0} = S1,
+    S2 = S1#msrpce_state{data = <<>>, offset = O0 + 16},
+    S3 = finish(Fun(Input, S2)),
+    S4 = align(16, S3),
+    #msrpce_state{data = DD} = S4,
+    D1 = iolist_to_binary([D0, <<(byte_size(DD)):32/little, 0:12/unit:8>>, DD]),
+    S4#msrpce_state{data = D1}.
+
+read_privhdr_v1(Fun, S0 = #msrpce_state{}) ->
+    S1 = align(8, S0),
+    #msrpce_state{data = D0, offset = O0} = S1,
+    <<Len:32/little, _:32, DD:Len/binary, D1/binary>> = D0,
+    S2 = S1#msrpce_state{data = DD, offset = O0 + 8},
+    {Output, S3} = Fun(S2),
+    S4 = finish(S3),
+    {Output, S4#msrpce_state{data = D1, offset = O0 + 8 + Len}}.
+
+read_privhdr_v2(Fun, S0 = #msrpce_state{}) ->
+    S1 = align(16, S0),
+    #msrpce_state{data = D0, offset = O0} = S1,
+    <<Len:32/little, _:12/unit:8, DD:Len/binary, D1/binary>> = D0,
+    S2 = S1#msrpce_state{data = DD, offset = O0 + 16},
+    {Output, S3} = Fun(S2),
+    S4 = finish(S3),
+    {Output, S4#msrpce_state{data = D1, offset = O0 + 16 + Len}}.

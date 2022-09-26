@@ -58,3 +58,31 @@
     maxlen :: msrpce:uint16(),
     str :: msrpce:pointer(msrpce:unicode())
     }).
+
+-record(msrpce_syntax_id, {
+    uuid = msrpce:uuid_from_string("8a885d04-1ceb-11c9-9fe8-08002b104860") :: msrpce:uuid(),
+    version = 2 :: msrpce:uint32()
+    }).
+
+-record(msrpce_interface_id, {
+    uuid = <<0:16/unit:8>> :: msrpce:uuid(),
+    ver_maj = 1 :: msrpce:uint16(),
+    ver_min = 0 :: msrpce:uint16()
+    }).
+
+-record(msrpce_cte_v1, {
+    version = 1 :: msrpce:uint8(),
+    endian = 16#10 :: msrpce:uint8(),
+    hdrlen = 16#0800 :: msrpce:uint16(),    % endian swapped!
+    filler = <<16#CCCCCCCC:32/big>> :: msrpce:fixed_bin(4)
+    }).
+
+-record(msrpce_cte_v2, {
+    version = 2 :: msrpce:uint8(),
+    endian = 16#10 :: msrpce:uint8(),
+    hdrlen = 16#4000 :: msrpce:uint16(),    % endian swapped!
+    endinfo = 16#cccccccc :: msrpce:uint32(),
+    reserved = <<16#cccccccc:32/big, 16#cccccccc:32/big, 16#cccccccc:32/big, 16#cccccccc:32/big>> :: msrpce:fixed_bin(16),
+    xfersyntax = #msrpce_syntax_id{} :: #msrpce_syntax_id{},
+    interfaceid = #msrpce_interface_id{} :: #msrpce_interface_id{}
+    }).

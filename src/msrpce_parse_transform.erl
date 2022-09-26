@@ -30,6 +30,8 @@
 
 -record(?MODULE, {
     opts :: [term()],
+    file :: undefined | string(),
+    cte = false :: boolean(),
     compiler :: msrpce_compiler:state()
     }).
 
@@ -60,16 +62,22 @@ transform(attribute, Form, S0 = #?MODULE{}) ->
             transform_opts(Form, S0);
         rpce_struct ->
             transform_struct(Form, S0);
+        rpce_stream ->
+            transform_stream(Form, S0);
+        file ->
+            [FileNameTree, _] = erl_syntax:attribute_arguments(Form),
+            S1 = S0#?MODULE{file = erl_syntax:string_value(FileNameTree)},
+            {[Form], S1};
         _Other ->
             {[Form], S0}
     end;
 transform(eof_marker, Form, S0 = #?MODULE{compiler = C0}) ->
     FuncForms = msrpce_compiler:func_forms(C0),
-    lists:foreach(fun (FForm) ->
-        io:format("~s\n", [erl_pp:form(FForm)])
-    end, FuncForms),
+    %lists:foreach(fun (FForm) ->
+    %  io:format("~s\n", [erl_pp:form(FForm)])
+    %end, lists:reverse(FuncForms)),
     {FuncForms ++ [Form], S0};
-transform(Type, Form, S0) ->
+transform(_Type, Form, S0) ->
     {[Form], S0}.
 
 add_record(Form, S0 = #?MODULE{compiler = C0}) ->
@@ -82,7 +90,7 @@ add_record(Form, S0 = #?MODULE{compiler = C0}) ->
             erl_syntax:record_field_name(FieldNameTree)),
         T = erl_syntax:typed_record_field_type(FieldType),
         case (catch type_to_msrpce_type(T)) of
-            {'EXIT', Why} ->
+            {'EXIT', _Why} ->
                 {FieldName, {untranslatable_type, T}};
             RpceType ->
                 {FieldName, RpceType}
@@ -149,6 +157,8 @@ type_to_msrpce_type(Form) ->
                                 erl_syntax:type_application_arguments(Form),
                             {RType, type_to_msrpce_type(RefType)};
 
+                        {msrpce, uuid} -> {fixed_binary, 16, 4};
+
                         {msrpce, str} -> string;
                         {msrpce, bin} -> binary;
                         {msrpce, varying_str} -> varying_string;
@@ -203,31 +213,57 @@ add_type(Form, S0 = #?MODULE{compiler = C0}) ->
     {Name, TypeDef, _Args} = erl_syntax:concrete(TypeDefAbs),
     case (catch type_to_msrpce_type(TypeDef)) of
         {'EXIT', _Why} ->
-            io:format("unsupported typedef for ~s\n", [Name]),
+            %io:format("unsupported typedef for ~s\n", [Name]),
             S0;
         Type ->
             {ok, C1} = msrpce_compiler:define_type(Name, Type, C0),
             S0#?MODULE{compiler = C1}
     end.
 
-transform_struct(Form, S0 = #?MODULE{compiler = C0}) ->
+transform_struct(Form, S0 = #?MODULE{compiler = C0, file = FN}) ->
     [ArgsAbs] = erl_syntax:attribute_arguments(Form),
     case erl_syntax:concrete(ArgsAbs) of
         {TypeName, Opts0} when is_atom(TypeName) and is_map(Opts0) ->
-            Loc = erl_syntax:get_pos(Form),
-            Opts1 = Opts0#{location => Loc},
+            Loc0 = erl_syntax:get_pos(Form),
+            Loc1 = erl_anno:set_file(FN, Loc0),
+            Opts1 = Opts0#{location => Loc1},
             {ok, C1} = msrpce_compiler:compile_type(TypeName, Opts1, C0),
             {[], S0#?MODULE{compiler = C1}};
 
         TypeName when is_atom(TypeName) ->
-            Loc = erl_syntax:get_pos(Form),
-            Opts = #{location => Loc},
+            Loc0 = erl_syntax:get_pos(Form),
+            Loc1 = erl_anno:set_file(FN, Loc0),
+            Opts = #{location => Loc1},
             {ok, C1} = msrpce_compiler:compile_type(TypeName, Opts, C0),
             {[], S0#?MODULE{compiler = C1}};
 
         Args ->
             error({badarg, rpce_struct, Args})
     end.
+
+transform_stream(Form, S0 = #?MODULE{compiler = C0, cte = false, file = FN}) ->
+    Loc0 = erl_syntax:get_pos(Form),
+    Loc1 = erl_anno:set_file(FN, Loc0),
+    Opts = #{location => Loc1},
+    {ok, C1} = msrpce_compiler:compile_type(msrpce_cte_v1, Opts, C0),
+    {ok, C2} = msrpce_compiler:compile_type(msrpce_cte_v2, Opts, C1),
+    transform_stream(Form, S0#?MODULE{cte = true, compiler = C2});
+
+transform_stream(Form, S0 = #?MODULE{compiler = C0, file = FN}) ->
+    Loc0 = erl_syntax:get_pos(Form),
+    Loc1 = erl_anno:set_file(FN, Loc0),
+    Opts0 = #{location => Loc1},
+    [ArgsAbs] = erl_syntax:attribute_arguments(Form),
+    Opts2 = case erl_syntax:concrete(ArgsAbs) of
+        {StreamName, Structs} when is_atom(StreamName) and is_list(Structs) ->
+            Opts0;
+        {StreamName, Structs, Opts1} when is_atom(StreamName) and
+                                          is_list(Structs) and
+                                          is_map(Opts1) ->
+            maps:merge(Opts0, Opts1)
+    end,
+    {ok, C1} = msrpce_compiler:compile_stream(StreamName, Structs, Opts2, C0),
+    {[], S0#?MODULE{compiler = C1}}.
 
 transform_opts(Form, S0 = #?MODULE{compiler = C0}) ->
     [ArgsAbs] = erl_syntax:attribute_arguments(Form),

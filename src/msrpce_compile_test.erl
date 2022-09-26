@@ -28,6 +28,9 @@
 
 -compile({parse_transform, msrpce_parse_transform}).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
 -include("include/records.hrl").
 -include("include/types.hrl").
 
@@ -87,6 +90,7 @@
     }).
 
 -rpce(#{endian => big}).
+
 -rpce_struct(what).
 -rpce_struct(test2).
 -rpce_struct(test3).
@@ -97,8 +101,7 @@
 -rpce_struct(test8).
 -rpce_struct(test9).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
+-rpce_stream({strtest, [test1, test3]}).
 
 test1_test() ->
     Struct = #test1{a = 1, b = 2, c = 3, d = 4},
@@ -204,5 +207,18 @@ test9_test() ->
         Data),
     DeStruct = decode_test9(Data),
     ?assertMatch(Struct, DeStruct).
+
+stream_test() ->
+    Struct1 = #test1{a = 1, b = 2, c = 3, d = 4},
+    Struct3 = #test3{a = 30, b = "hello world"},
+    Data = encode_strtest_v1([Struct1, Struct3]),
+    <<1, 16#10, 8:16/little, _:32, Inner/binary>> = Data,
+    <<I0Len:32/little, _:32, StructData0:I0Len/binary,
+      I1Len:32/little, _:32, StructData1:I1Len/binary>> = Inner,
+    ?assertMatch(<<1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, StructData0),
+    ?assertMatch(<<30, 0:24, 12:32/big, 0:32, 12:32/big, "hello world", 0,
+                   _:32>>, StructData1),
+    DeStream = decode_strtest(Data),
+    ?assertMatch([Struct1, Struct3], DeStream).
 
 -endif.

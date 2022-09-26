@@ -29,7 +29,8 @@
 -export([
     encode_sid/1, decode_sid/1,
     encode_filetime/1, decode_filetime/1,
-    encode_rpc_unicode/1, decode_rpc_unicode/1
+    encode_rpc_unicode/1, decode_rpc_unicode/1,
+    uuid_to_string/1, uuid_from_string/1
     ]).
 
 -export_type([
@@ -42,14 +43,20 @@
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
     pointer/1, str/0, varying_str/0, unicode/0, bin/0, fixed_bin/1,
-    varying_bin/0, aligned_bin/2
+    varying_bin/0, aligned_bin/2, uuid/0
     ]).
 
 -include("include/records.hrl").
 
 -type sid() :: [integer()].
+%% A Microsoft Security Identifier (SID) in numeric form (e.g. [1,5,1234,123])
+
 -type time_unit() :: microsecond | millisecond | second.
 -type filetime() :: null | never | {integer(), time_unit()}.
+%% Common time specification format used in MSRPCE
+
+-type uuid() :: aligned_bin(16, 4).
+%% A UUID in binary form
 
 -type uint8() :: integer().
 -type uint16() :: integer().
@@ -62,34 +69,71 @@
 -type int64() :: integer().
 
 -type fixed_array(_N, T) :: [T].
+%% A fixed-size array with no length integer included.
+
 -type conformant_array(T) :: [T].
+%% A conformant array (has "maximum" length, offset and real length, then the
+%% data). Maximum length may be hoisted.
+
 -type varying_array(T) :: [T].
+%% A varying array (has only a "maximum" length and then the data)
+
 -type array(T) :: [T].
+%% A conformant-varying array (the most commonly used kind)
+
 -type pointer(T) :: undefined | T.
+%% A pointer to another RPCE structure. A 32-bit pointer value is included in
+%% the stream and then the actual content of it is serialised at the end.
 
 -type custom(_Base, RealType, _Encoder, _Decoder) :: RealType.
+%% Defines a custom extension to a base RPC type. The "Base" argument should be
+%% the base RPCE type (e.g. <code>msrpce:uint16()</code>). Encoder and Decoder
+%% specify the names of functions in the current module to use for encoding
+%% and decoding. They should be of arity /1. Encoder takes the decoded base
+%% type and outputs RealType. Decoder does the inverse.
+
 -type builtin(_Base, RealType, _Encoder, _Decoder) :: RealType.
+%% An extension type defined in the <code>msrpce</code> module.
 
 -type bin() :: binary().
--type fixed_bin(_N) :: binary().
--type aligned_bin(_N, _Align) :: binary().
--type varying_bin() :: binary().
--type str() :: string().
--type varying_str() :: string().
--type unicode() :: string().
+%% A conformant-varying binary string, with no terminator. Conformant string
+%% maximum lengths are not hoisted.
 
+-type fixed_bin(_N) :: binary().
+%% A fixed-length binary inserted into the stream with alignment 1 and no
+%% length integer attached.
+
+-type aligned_bin(_N, _Align) :: binary().
+%% Same as <code>fixed_bin(N)</code> but with the specified alignment. This is
+%% a useful "escape hatch" for custom types.
+
+-type varying_bin() :: binary().
+%% A varying binary string, with no terminator.
+
+-type str() :: string().
+%% A conformant-varying UTF8 string with a NUL terminator.
+
+-type varying_str() :: string().
+%% A varying UTF8 string with a NUL terminator.
+
+-type unicode() :: string().
+%% A conformant-varying UTF16-LE string with a NUL terminator.
+
+-spec encode_sid(sid()) -> #msrpce_sid{}.
 encode_sid([Rev, IdAuth | SubAuths]) ->
     #msrpce_sid{revision = Rev,
                 sub_auth_count = length(SubAuths),
                 identifier_auth = <<IdAuth:48/big>>,
                 sub_auths = SubAuths}.
 
+-spec decode_sid(#msrpce_sid{}) -> sid().
 decode_sid(#msrpce_sid{revision = Rev,
                        sub_auth_count = SubAuthCount,
                        identifier_auth = <<IdAuth:48/big>>,
                        sub_auths = SubAuths}) when (length(SubAuths) == SubAuthCount) ->
     [Rev, IdAuth | SubAuths].
 
+-spec encode_filetime(filetime()) -> aligned_bin(16,4).
 encode_filetime(null) ->
     <<0:64>>;
 encode_filetime(never) ->
@@ -102,6 +146,7 @@ encode_filetime({N, millisecond}) ->
 encode_filetime({N, second}) ->
     encode_filetime({N * 1000, millisecond}).
 
+-spec decode_filetime(aligned_bin(16,4)) -> filetime().
 decode_filetime(<<0:64>>) -> null;
 decode_filetime(<<16#7fffffffffffffff:64/little>>) -> never;
 decode_filetime(<<V:64/little>>) ->
@@ -120,12 +165,14 @@ decode_filetime(<<V:64/little>>) ->
             {USec, microsecond}
     end.
 
+-spec encode_rpc_unicode(string()) -> #msrpce_unicode_string{}.
 encode_rpc_unicode(String) ->
     Len = string:len(String),
     #msrpce_unicode_string{len = Len,
                            maxlen = Len + 1,
                            str = String}.
 
+-spec decode_rpc_unicode(#msrpce_unicode_string{}) -> string().
 decode_rpc_unicode(R = #msrpce_unicode_string{len = L, maxlen = MaxL, str = S0}) ->
     case string:len(S0) of
         V when (V =< MaxL) and (V >= L) ->
@@ -133,3 +180,29 @@ decode_rpc_unicode(R = #msrpce_unicode_string{len = L, maxlen = MaxL, str = S0})
         _ ->
             error({bad_rpc_unicode, R})
     end.
+
+-type string_uuid() :: string().
+%% A UUID in string hex form (e.g. "5e8cb9bc-bbc2-38b2-afc9-a9218c3b1d9c")
+
+-spec uuid_to_string(uuid()) -> string_uuid().
+uuid_to_string(<<TimeLow:32/big, TimeMid:16/big,
+                 TimeHiVer:16/big, ClockSeq:16/big,
+                 Node:48/big>>) ->
+    string:to_lower(io_lib:format(
+        "~8.16.0B-~4.16.0B-~4.16.0B-~4.16.0B-~12.16.0B",
+        [TimeLow, TimeMid, TimeHiVer, ClockSeq, Node])).
+
+-spec uuid_from_string(string_uuid()) -> uuid().
+uuid_from_string(Str0) ->
+    Hex = lists:seq($0, $9) ++ lists:seq($a, $f),
+    Str1 = string:to_lower(Str0),
+    {TimeLowHex, [$- | Str2]} = string:take(Str1, Hex),
+    {TimeMidHex, [$- | Str3]} = string:take(Str2, Hex),
+    {TimeHighVerHex, [$- | Str4]} = string:take(Str3, Hex),
+    {ClockSeqHex, [$- | Str5]} = string:take(Str4, Hex),
+    {NodeHex, []} = string:take(Str5, Hex),
+    <<(binary_to_integer(iolist_to_binary([TimeLowHex]), 16)):32/big,
+      (binary_to_integer(iolist_to_binary([TimeMidHex]), 16)):16/big,
+      (binary_to_integer(iolist_to_binary([TimeHighVerHex]), 16)):16/big,
+      (binary_to_integer(iolist_to_binary([ClockSeqHex]), 16)):16/big,
+      (binary_to_integer(iolist_to_binary([NodeHex]), 16)):48/big>>.

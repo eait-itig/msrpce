@@ -32,9 +32,12 @@
     set_options/2,
     define_type/3,
     compile_type/3,
+    compile_stream/4,
     func_forms/1
     ]).
--export_type([state/0]).
+-export_type([
+    state/0, options/0, type_options/0, rpce_type/0
+    ]).
 
 -type loc() :: erl_syntax:annotation_or_location().
 -type options() :: #{
@@ -77,23 +80,31 @@
 -record(?MODULE, {
     opts = #{} :: options(),
     types = #{} :: type_index(),
+    sgen = #{} :: #{type_name() => boolean()},
     funcs = [] :: [form()]
     }).
 
 -opaque state() :: #?MODULE{}.
 
+%% @doc Creates a new blank compiler state.
 -spec new() -> state().
 new() -> new(#{}).
 
+%% @doc Creates a new compiler state with the specified initial options.
 -spec new(options()) -> state().
 new(Opts) ->
     #?MODULE{opts = Opts}.
 
+%% @doc Changes the options on a compiler state.
+%%
+%% These options will only affect subsequent calls to {@link compile_type/3},
+%% not the result of any previous calls.
 -spec set_options(options(), state()) -> state().
 set_options(NewOpts, S0 = #?MODULE{opts = Opts0}) ->
     Opts1 = maps:merge(Opts0, NewOpts),
     S0#?MODULE{opts = Opts1}.
 
+%% @doc Defines a type or struct.
 -spec define_type(type_name(), rpce_type(), state()) -> {ok, state()} | {error, term()}.
 define_type(Name, Type, S0 = #?MODULE{types = T0}) ->
     case T0 of
@@ -105,15 +116,18 @@ define_type(Name, Type, S0 = #?MODULE{types = T0}) ->
             {ok, S1}
     end.
 
--spec compile_type(type_name(), type_options(), state()) -> {ok, state()} | {error, term()}.
+%% @doc Compiles a type or struct.
+-spec compile_type(type_name(), type_options(), state()) ->
+    {ok, state()} | {error, term()}.
 compile_type(Name, TOpts, S0 = #?MODULE{types = T0, funcs = F0, opts = Opts}) ->
     case T0 of
         #{Name := Type0} ->
             case resolve_typerefs(Type0, T0) of
                 {ok, Type1 = {struct, RecName, _}} ->
+                    #?MODULE{sgen = SG0} = S0,
+                    SG1 = SG0#{RecName => true},
                     L = maps:get(location, TOpts, 2),
                     ToCompile = [{[], Type1} | get_deferred_types(Type1)],
-                    io:format("~p\n", [ToCompile]),
                     F1 = lists:foldl(fun ({Path, FType}, Acc) ->
                         EForm = encode_struct_func_form(Path, FType, L, Opts),
                         DForm = decode_struct_func_form(Path, FType, L, Opts),
@@ -123,7 +137,7 @@ compile_type(Name, TOpts, S0 = #?MODULE{types = T0, funcs = F0, opts = Opts}) ->
                     EForm = encode_func_form(Type1, L),
                     DForm = decode_func_form(Type1, L),
                     F2 = [EForm, DForm | F1],
-                    {ok, S0#?MODULE{funcs = F2}};
+                    {ok, S0#?MODULE{funcs = F2, sgen = SG1}};
                 {ok, Other} ->
                     {error, {not_struct_type, Other}};
                 Err -> Err
@@ -132,8 +146,49 @@ compile_type(Name, TOpts, S0 = #?MODULE{types = T0, funcs = F0, opts = Opts}) ->
             {error, {undefined_type, Name}}
     end.
 
+%% @doc Compiles a stream.
+-spec compile_stream(type_name(), [type_name()], type_options(), state()) ->
+    {ok, state()} | {error, term()}.
+compile_stream(Name, Structs, TOpts, S0 = #?MODULE{opts = Opts, sgen = SG0}) ->
+    case SG0 of
+        #{Name := _} ->
+            {error, {duplicate_name, Name}};
+        _ ->
+            case ensure_structs(Structs, TOpts, S0) of
+                {ok, S1 = #?MODULE{funcs = F0}} ->
+                    L = maps:get(location, TOpts, 2),
+                    EForm = encode_stream_func_form(Name, L, Opts),
+                    E1Form = encode_stream_func_form(1, Name, Structs, L, Opts),
+                    E2Form = encode_stream_func_form(2, Name, Structs, L, Opts),
+                    DForm = decode_stream_func_form(Name, L, Opts),
+                    D1Form = decode_stream_func_form(1, Name, Structs, L, Opts),
+                    D2Form = decode_stream_func_form(2, Name, Structs, L, Opts),
+                    F1 = [EForm, E1Form, E2Form, DForm, D1Form, D2Form | F0],
+                    {ok, S1#?MODULE{funcs = F1}};
+                Err ->
+                    Err
+            end
+    end.
+
+-spec ensure_structs([type_name()], type_options(), state()) ->
+    {ok, state()} | {error, term()}.
+ensure_structs([], _, S0 = #?MODULE{}) -> {ok, S0};
+ensure_structs([Struct | Rest], TOpts, S0 = #?MODULE{sgen = SG0}) ->
+    case SG0 of
+        #{Struct := true} ->
+            ensure_structs(Rest, TOpts, S0);
+        _ ->
+            case compile_type(Struct, TOpts, S0) of
+                {ok, S1} ->
+                    ensure_structs(Rest, TOpts, S1);
+                Err ->
+                    Err
+            end
+    end.
+
+%% @doc Returns the compiled forms.
 -spec func_forms(state()) -> [form()].
-func_forms(S0 = #?MODULE{funcs = F0}) ->
+func_forms(#?MODULE{funcs = F0}) ->
     F0.
 
 -spec get_deferred_types(rpce_type()) -> [{type_path(), rpce_type()}].
@@ -159,9 +214,6 @@ get_deferred_types({struct, RecName, Fields}, Path0, _Name) ->
 get_deferred_types({fixed_array, _N, SubType}, Path0, Name) ->
     Path1 = Path0 ++ [{array_field, Name}],
     [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
-get_deferred_types({fixed_array, _N, SubType}, Path0, Name) ->
-    Path1 = Path0 ++ [{array_field, Name}],
-    [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
 get_deferred_types({conformant_array, SubType}, Path0, Name) ->
     Path1 = Path0 ++ [{array_field, Name}],
     [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
@@ -173,7 +225,8 @@ get_deferred_types({array, SubType}, Path0, Name) ->
     [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
 get_deferred_types(_, _, _) -> [].
 
--spec resolve_typerefs(rpce_type(), type_index()) -> {ok, rpce_type()} | {error, term()}.
+-spec resolve_typerefs(rpce_type(), type_index()) ->
+    {ok, rpce_type()} | {error, term()}.
 resolve_typerefs(uint8, _) -> {ok, uint8};
 resolve_typerefs(boolean, _) -> {ok, boolean};
 resolve_typerefs(uint16, _) -> {ok, uint16};
@@ -225,15 +278,6 @@ resolve_typerefs({struct, RecName, []}, _Idx) ->
     {ok, {struct, RecName, []}};
 resolve_typerefs({struct, RecName, [{Field, SubType0} | Rest]}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
-        {ok, {struct, SubRecName0, SubFields}} ->
-            SubRecName1 = list_to_atom(atom_to_list(RecName) ++ "_" ++
-                atom_to_list(SubRecName0)),
-            SubType1 = {struct, SubRecName1, SubFields},
-            case resolve_typerefs({struct, RecName, Rest}, Idx) of
-                {ok, {struct, RecName, RestFields}} ->
-                    {ok, {struct, RecName, [{Field, SubType1} | RestFields]}};
-                Err -> Err
-            end;
         {ok, SubType1} ->
             case resolve_typerefs({struct, RecName, Rest}, Idx) of
                 {ok, {struct, RecName, RestFields}} ->
@@ -284,7 +328,6 @@ dec_fun(Parts) ->
 
 -type tvar() :: var().
 -type dvar() :: var().
--type vvar() :: var().
 -type svar() :: var().
 -type ovar() :: var().
 
@@ -292,8 +335,6 @@ dec_fun(Parts) ->
 tvar(N) -> var("Temp", N).
 -spec dvar(integer()) -> dvar().
 dvar(N) -> var("Data", N).
--spec vvar(integer()) -> vvar().
-vvar(N) -> var("Value", N).
 -spec svar(integer()) -> svar().
 svar(N) -> var("State", N).
 -spec ovar(integer()) -> ovar().
@@ -314,7 +355,6 @@ ovar(N) -> var("Offset", N).
     tn = 0 :: integer(),
     odn = 0 :: integer(),
     sn = 0 :: integer(),
-    vn = 0 :: integer(),
     ctx = [] :: fctx()
     }).
 -type fstate() :: #fstate{}.
@@ -374,15 +414,6 @@ inc_svar(S0 = #fstate{sn = I0, in_dblk = false}) ->
 -spec cur_svar(fstate()) -> {svar(), fstate()}.
 cur_svar(S0 = #fstate{in_dblk = true}) -> cur_svar(close_dblk(S0));
 cur_svar(S0 = #fstate{sn = I, in_dblk = false}) -> {svar(I), S0}.
-
--spec inc_vvar(fstate()) -> {vvar(), vvar(), fstate()}.
-inc_vvar(S0 = #fstate{vn = I0}) ->
-    I1 = I0 + 1,
-    S1 = S0#fstate{vn = I1},
-    {vvar(I0), vvar(I1), S1}.
-
--spec cur_vvar(fstate()) -> vvar().
-cur_vvar(#fstate{sn = I}) -> vvar(I).
 
 -spec push_struct(atom(), fstate()) -> fstate().
 push_struct(Struct, S0 = #fstate{ctx = Ctx0}) ->
@@ -626,7 +657,7 @@ str_len_expr(Var) ->
         ]).
 
 -spec encode_data(rpce_type(), var(), fstate()) -> fstate().
-encode_data({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C}) ->
+encode_data({custom, Base, _Enc, _Dec}, SrcVar, S0 = #fstate{customs = C}) ->
     #{SrcVar := TVar} = C,
     encode_data(Base, TVar, S0);
 
@@ -845,7 +876,7 @@ encode_data(Type = {pointer, RefType}, SrcVar, S0 = #fstate{}) ->
              Fun, SrcVar, SV0])),
     add_forms([Form], 4, S2);
 
-encode_data(Type = {struct, Record, Fields}, SrcVar, S0 = #fstate{}) ->
+encode_data(Type = {struct, Record, Fields}, _SrcVar, S0 = #fstate{}) ->
     Align = type_align(Type),
     S1 = push_struct(Record, S0),
     #fstate{ctx = Ctx, unpacks = U} = S1,
@@ -870,17 +901,17 @@ encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
         erl_syntax:application(Enc, [SrcVar])),
     S3 = add_forms([Form], S2),
     encode_unpacks(Base, TVar, S3);
-encode_unpacks({conformant_array, Type}, SrcVar, S0 = #fstate{}) ->
+encode_unpacks({conformant_array, _Type}, SrcVar, S0 = #fstate{}) ->
     MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
         [SrcVar]),
     add_hoist(uint32, MaxLenExpr, S0);
-encode_unpacks({array, Type}, SrcVar, S0 = #fstate{}) ->
+encode_unpacks({array, _Type}, SrcVar, S0 = #fstate{}) ->
     MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
         [SrcVar]),
     add_hoist(uint32, MaxLenExpr, S0);
-encode_unpacks({fixed_array, _N, Type}, _SrcVar, S0 = #fstate{}) ->
+encode_unpacks({fixed_array, _N, _Type}, _SrcVar, S0 = #fstate{}) ->
     S0;
-encode_unpacks({varying_array, Type}, _SrcVar, S0 = #fstate{}) ->
+encode_unpacks({varying_array, _Type}, _SrcVar, S0 = #fstate{}) ->
     S0;
 encode_unpacks({pointer, _RefType}, _SrcVar, S0 = #fstate{}) ->
     S0;
@@ -924,9 +955,16 @@ encode_hoists(TopType, SrcVar, S0 = #fstate{hoists = [{Type, Expr} | Rest]}) ->
     S1 = encode_data(Type, Expr, S0),
     encode_hoists(TopType, SrcVar, S1#fstate{hoists = Rest}).
 
+-spec set_anno(loc(), atom(), form()) -> form().
+set_anno(Loc0, Func, Forms) ->
+    Loc1 = erl_anno:set_generated(true, Loc0),
+    File0 = erl_anno:file(Loc1),
+    File1 = File0 ++ "(" ++ atom_to_list(Func) ++ ")",
+    Loc2 = erl_anno:set_file(File1, Loc1),
+    erl_parse:map_anno(fun (_) -> Loc2 end, Forms).
+
 -spec encode_struct_func_form(type_path(), rpce_type(), loc(), options()) -> [form()].
 encode_struct_func_form(Path0, Type, Loc, Opts) ->
-    io:format("compile ~p: ~p\n", [Path0, Type]),
     Ctx0 = lists:foldl(fun (Struct, Acc) ->
         [{struct, Struct} | Acc]
     end, [], Path0),
@@ -959,9 +997,7 @@ encode_struct_func_form(Path0, Type, Loc, Opts) ->
         FunName,
         [erl_syntax:clause([InVar, SV0], [], Forms ++ [SV1])]),
     F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, Loc)
-    end, F1).
+    set_anno(Loc, erl_syntax:atom_value(FunName), F1).
 
 encode_func_form({struct, RecName, _}, Loc) ->
     InVar = erl_syntax:variable('Input'),
@@ -986,9 +1022,7 @@ encode_func_form({struct, RecName, _}, Loc) ->
         concat_atoms([encode, RecName]),
         [erl_syntax:clause([InVar], [], [FF0, FF1, FF2, FF3, FF4])]),
     F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, Loc)
-    end, F1).
+    set_anno(Loc, erl_syntax:atom_value(concat_atoms([encode, RecName])), F1).
 
 -spec decode_data(rpce_type(), var(), fstate()) -> fstate().
 decode_data({custom, Base, _Enc, _Dec}, DstVar, S0 = #fstate{}) ->
@@ -1239,7 +1273,7 @@ decode_data(Type = {pointer, RefType}, DstVar, S0 = #fstate{}) ->
              Fun, SV0])),
     add_forms([Form], 4, S2);
 
-decode_data(Type = {struct, Record, Fields}, DstVar, S0 = #fstate{}) ->
+decode_data(Type = {struct, Record, Fields}, _DstVar, S0 = #fstate{}) ->
     Align = type_align(Type),
     S1 = push_struct(Record, S0),
     #fstate{ctx = Ctx, unpacks = U} = S1,
@@ -1396,8 +1430,7 @@ decode_finish({struct, Record, Fields}, SrcVar, DstVar, S0 = #fstate{}) ->
     PackForm = erl_syntax:match_expr(
         DstVar,
         erl_syntax:record_expr(erl_syntax:atom(Record), FieldPackExprs)),
-    #fstate{forms = F0} = S2,
-    S3 = S2#fstate{forms = F0 ++ [UnpackForm]},
+    S3 = add_forms([UnpackForm], S2),
     S4 = lists:foldl(fun ({FName, FType, FSrcVar, FDstVar}, SS0) ->
         SS1 = push_field(FName, SS0),
         SS2 = decode_finish(FType, FSrcVar, FDstVar, SS1),
@@ -1406,7 +1439,7 @@ decode_finish({struct, Record, Fields}, SrcVar, DstVar, S0 = #fstate{}) ->
     S5 = add_forms([PackForm], S4),
     pop_struct(S5);
 
-decode_finish(Type, SrcVar, DstVar, S0 = #fstate{forms = F0}) ->
+decode_finish(_Type, SrcVar, DstVar, S0 = #fstate{}) ->
     Form = erl_syntax:match_expr(DstVar, SrcVar),
     add_forms([Form], S0).
 
@@ -1431,7 +1464,6 @@ decode_struct_func_form(Path0, Type, Loc, Opts) ->
             {struct, RecName, _} = Type,
             {dec_fun_name(Path0 ++ [RecName]), Ctx0}
     end,
-    io:format("func_form(~9999p, ~99999p) -> ~999999p (~99999p)\n", [Path0, Type, FunName, Ctx1]),
     S0 = #fstate{ctx = Ctx1, opts = Opts},
     OutVar = erl_syntax:variable('Output'),
     SV0 = svar(0),
@@ -1446,9 +1478,7 @@ decode_struct_func_form(Path0, Type, Loc, Opts) ->
         [erl_syntax:clause([SV0], [],
             Forms ++ [erl_syntax:tuple([OutVar, SV1])])]),
     F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, Loc)
-    end, F1).
+    set_anno(Loc, erl_syntax:atom_value(FunName), F1).
 
 -spec decode_finish_func_form(type_path(), rpce_type(), loc(), options()) -> [form()].
 decode_finish_func_form(Path0, Type, Loc, Opts) ->
@@ -1475,6 +1505,9 @@ decode_finish_func_form(Path0, Type, Loc, Opts) ->
     InVar = erl_syntax:variable('Input'),
     OutVar = erl_syntax:variable('Output'),
     SV0 = svar(0),
+    SillyForm = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state), []),
+        SV0),
     S1 = decode_finish(Type, InVar, OutVar, S0),
     #fstate{forms = Forms} = S1,
     F0 = erl_syntax:function(
@@ -1484,12 +1517,10 @@ decode_finish_func_form(Path0, Type, Loc, Opts) ->
                 erl_syntax:underscore()], [],
                 [erl_syntax:atom(undefined)]),
             erl_syntax:clause([InVar, SV0], [],
-                Forms ++ [OutVar])
+                [SillyForm] ++ Forms ++ [OutVar])
         ]),
     F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, Loc)
-    end, F1).
+    set_anno(Loc, erl_syntax:atom_value(FunName), F1).
 
 decode_func_form({struct, RecName, _}, Loc) ->
     InVar = erl_syntax:variable('Input'),
@@ -1513,9 +1544,173 @@ decode_func_form({struct, RecName, _}, Loc) ->
         concat_atoms([decode, RecName]),
         [erl_syntax:clause([InVar], [], [FF0, FF1, FF2, FF3])]),
     F1 = erl_syntax:revert(F0),
-    erl_parse:map_anno(fun (_) ->
-        erl_anno:set_generated(true, Loc)
-    end, F1).
+    set_anno(Loc, erl_syntax:atom_value(finish_fun_name([RecName])), F1).
+
+decode_stream_func_form(Name, Loc, Opts) ->
+    InVar = erl_syntax:variable('Input'),
+    FuncName = concat_atoms([decode, Name]),
+    V1Fun = concat_atoms([decode, Name, v1]),
+    V2Fun = concat_atoms([decode, Name, v2]),
+    FF0 = erl_syntax:case_expr(InVar,
+        [erl_syntax:clause([
+            erl_syntax:binary([
+                erl_syntax:binary_field(erl_syntax:integer(1)),
+                erl_syntax:binary_field(erl_syntax:underscore(),
+                    [erl_syntax:atom(binary)])])],
+            [], [erl_syntax:application(V1Fun, [InVar])]),
+         erl_syntax:clause([
+            erl_syntax:binary([
+                erl_syntax:binary_field(erl_syntax:integer(2)),
+                erl_syntax:binary_field(erl_syntax:underscore(),
+                    [erl_syntax:atom(binary)])])],
+            [], [erl_syntax:application(V2Fun, [InVar])]),
+         erl_syntax:clause(
+            [erl_syntax:binary([
+                erl_syntax:binary_field(tvar(0)),
+                erl_syntax:binary_field(erl_syntax:underscore(),
+                    [erl_syntax:atom(binary)])])],
+            [],
+            [erl_syntax:application(erl_syntax:atom(error),
+                [erl_syntax:tuple([
+                    erl_syntax:atom(bad_rpc_ver), tvar(0)])])])]),
+    F0 = erl_syntax:function(
+        FuncName,
+        [erl_syntax:clause([InVar], [], [FF0])]),
+    F1 = erl_syntax:revert(F0),
+    set_anno(Loc, erl_syntax:atom_value(FuncName), F1).
+
+decode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
+    {CteRec, PrivHdrFun, FuncName} = case Ver of
+        1 -> {msrpce_cte_v1, read_privhdr_v1, concat_atoms([decode, Name, v1])};
+        2 -> {msrpce_cte_v2, read_privhdr_v2, concat_atoms([decode, Name, v2])}
+    end,
+    InVar = erl_syntax:variable('Input'),
+    S0 = #fstate{opts = Opts},
+    {StructMap, S1} = lists:foldl(fun (Struct, {Acc, SS0}) ->
+        {TVar, SS1} = inc_tvar(SS0),
+        {Acc ++ [{TVar, dec_fun([Struct]), finish_fun_name([Struct])}], SS1}
+    end, {[], S0}, Structs),
+    {SV0, SV1, S2} = inc_svar(S1),
+    FF0 = erl_syntax:match_expr(SV0,
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(mode),
+                erl_syntax:atom(decode)),
+             erl_syntax:record_field(erl_syntax:atom(data),
+                InVar)])),
+    CteVar = erl_syntax:variable('CTE'),
+    CteFun = dec_fun_name([CteRec]),
+    FF1 = erl_syntax:match_expr(
+        erl_syntax:tuple([CteVar, SV1]),
+        erl_syntax:application(CteFun, [SV0])),
+    %% TODO: assert about contents of cte rec
+    CTEFields = case Ver of
+        1 -> [
+            erl_syntax:record_field(erl_syntax:atom(hdrlen),
+                erl_syntax:integer(16#0800))
+            ];
+        2 -> [
+            erl_syntax:record_field(erl_syntax:atom(hdrlen),
+                erl_syntax:integer(16#4000)),
+            erl_syntax:record_field(erl_syntax:atom(xfersyntax),
+                erl_syntax:record_expr(erl_syntax:atom(msrpce_syntax_id), [
+                    erl_syntax:record_field(erl_syntax:atom(version),
+                        erl_syntax:integer(2)),
+                    erl_syntax:record_field(erl_syntax:atom(uuid),
+                        erl_syntax:abstract(
+                            msrpce:uuid_from_string("8a885d04-1ceb-11c9-9fe8-08002b104860")))
+                    ]))
+            ]
+    end,
+    FF2 = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(CteRec), [
+            erl_syntax:record_field(erl_syntax:atom(version),
+                erl_syntax:integer(Ver)),
+            erl_syntax:record_field(erl_syntax:atom(endian),
+                erl_syntax:integer(16#10))
+            ] ++ CTEFields),
+        CteVar),
+    S3 = add_forms([FF0, FF1, FF2], S2),
+    S4 = lists:foldl(fun ({TVar, DecFun, FinishFunName}, SS0) ->
+        {SSV0, SSV1, SS1} = inc_svar(SS0),
+        {UnfinishVar, SS2} = inc_tvar(SS1),
+        Form0 = erl_syntax:match_expr(
+            erl_syntax:tuple([UnfinishVar, SSV1]),
+            erl_syntax:application(
+                erl_syntax:atom(msrpce_runtime),
+                erl_syntax:atom(PrivHdrFun),
+                [DecFun, SSV0])),
+        Form1 = erl_syntax:match_expr(TVar,
+            erl_syntax:application(
+                FinishFunName, [UnfinishVar, SSV1])),
+        add_forms([Form0, Form1], SS2)
+    end, S3, StructMap),
+    OutVars = [TVar || {TVar,_DecFun,_FinFun} <- StructMap],
+    FF3 = erl_syntax:list(OutVars),
+    S5 = add_forms([FF3], S4),
+    #fstate{forms = Forms} = S5,
+    F0 = erl_syntax:function(
+        FuncName,
+        [erl_syntax:clause([InVar], [], Forms)]),
+    F1 = erl_syntax:revert(F0),
+    set_anno(Loc, erl_syntax:atom_value(FuncName), F1).
+
+encode_stream_func_form(Name, Loc, _Opts) ->
+    ArgsVar = erl_syntax:variable('Args'),
+    FF0 = erl_syntax:application(
+        concat_atoms([encode, Name, v1]),
+        [ArgsVar]),
+    F0 = erl_syntax:function(
+        concat_atoms([encode, Name]),
+        [erl_syntax:clause([ArgsVar], [], [FF0])]),
+    F1 = erl_syntax:revert(F0),
+    set_anno(Loc, erl_syntax:atom_value(concat_atoms([encode, Name])), F1).
+
+encode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
+    {CteRec, PrivHdrFun, FuncName} = case Ver of
+        1 -> {msrpce_cte_v1, write_privhdr_v1, concat_atoms([encode, Name, v1])};
+        2 -> {msrpce_cte_v2, write_privhdr_v2, concat_atoms([encode, Name, v2])}
+    end,
+    S0 = #fstate{opts = Opts},
+    {StructMap, S1} = lists:foldl(fun (Struct, {Acc, SS0}) ->
+        {TVar, SS1} = inc_tvar(SS0),
+        {Acc ++ [{TVar, enc_fun([Struct])}], SS1}
+    end, {[], S0}, Structs),
+    {SV0, SV1, S2} = inc_svar(S1),
+    FF0 = erl_syntax:match_expr(SV0,
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(mode),
+                erl_syntax:atom(encode)),
+             erl_syntax:record_field(erl_syntax:atom(data),
+                erl_syntax:binary([]))])),
+    CteFun = enc_fun_name([CteRec]),
+    FF1 = erl_syntax:match_expr(SV1,
+        erl_syntax:application(CteFun,
+            [erl_syntax:record_expr(
+                erl_syntax:atom(CteRec), []),
+             SV0])),
+    S3 = add_forms([FF0, FF1], S2),
+    S4 = lists:foldl(fun ({TVar, Fun}, SS0) ->
+        {SSV0, SSV1, SS1} = inc_svar(SS0),
+        Form = erl_syntax:match_expr(SSV1,
+            erl_syntax:application(
+                erl_syntax:atom(msrpce_runtime),
+                erl_syntax:atom(PrivHdrFun),
+                [Fun, TVar, SSV0])),
+        add_forms([Form], SS1)
+    end, S3, StructMap),
+    {SV2, S5} = cur_svar(S4),
+    FF2 = erl_syntax:match_expr(
+        erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
+            [erl_syntax:record_field(erl_syntax:atom(data), dvar(0))]),
+        SV2),
+    S6 = add_forms([FF2, dvar(0)], S5),
+    #fstate{forms = Forms} = S6,
+    InVars = [TVar || {TVar,_Fun} <- StructMap],
+    F0 = erl_syntax:function(
+        FuncName,
+        [erl_syntax:clause([erl_syntax:list(InVars)], [], Forms)]),
+    F1 = erl_syntax:revert(F0),
+    set_anno(Loc, erl_syntax:atom_value(FuncName), F1).
 
 % make_forms([]) -> [];
 % make_forms(Tokens) ->
