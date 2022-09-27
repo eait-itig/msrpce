@@ -104,6 +104,10 @@
 %% <code>#{BitName => BitNumber :: integer()}</code>, where
 %% <code>BitNumber</code> is 0 for LSB.
 
+-type bitnum() :: integer().
+-type mask() :: integer().
+-type bitset_bitmap() :: #{atom() => bitnum() | {mask, mask()}}.
+
 -type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 
 -type bin() :: binary().

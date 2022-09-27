@@ -178,11 +178,21 @@ type_to_msrpce_type(Form) ->
                             [BaseType, _BitNameUnion, BitMapType] =
                                 erl_syntax:type_application_arguments(Form),
                             Fields = erl_syntax:map_type_fields(BitMapType),
-                            BitMap = [{erl_syntax:atom_value(
-                                erl_syntax:map_type_assoc_name(X)),
-                              erl_syntax:integer_value(
-                                erl_syntax:map_type_assoc_value(X))}
-                              || X <- Fields],
+                            BitMap = lists:foldl(fun (X, Acc) ->
+                                Key = erl_syntax:atom_value(
+                                    erl_syntax:map_type_assoc_name(X)),
+                                V0 = erl_syntax:map_type_assoc_value(X),
+                                V1 = case erl_syntax:type(V0) of
+                                    integer ->
+                                        erl_syntax:integer_value(V0);
+                                    tuple ->
+                                        [Atom, IntVal] =
+                                            erl_syntax:tuple_elements(V0),
+                                        {erl_syntax:atom_value(Atom),
+                                         erl_syntax:integer_value(IntVal)}
+                                end,
+                                Acc#{Key => V1}
+                            end, #{}, Fields),
                             {bitset, type_to_msrpce_type(BaseType), BitMap};
 
                         {msrpce, custom} ->

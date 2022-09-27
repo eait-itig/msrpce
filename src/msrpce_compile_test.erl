@@ -102,6 +102,33 @@
       owner     => 28,
       resource  => 2}).
 
+-type user_flags() :: msrpce:bitset(
+    ulong(),
+    guest | no_encrypt | lanman_key | subauth_key | machine | ntlmv2_dc |
+    profile | extra_sids | resource_groups,
+    #{guest         => 31,
+      no_encrypt    => 30,
+      lanman_key    => 28,
+      subauth_key   => 25,
+      machine       => 24,
+      ntlmv2_dc     => 23,
+      profile       => 21,
+      extra_sids    => 26,
+      resource_groups => 22}).
+
+-type samr_uac() :: msrpce:bitset(
+    ulong(),
+    disabled | homedir_req | no_password | temp_dupe | normal | mns_logon |
+    interdomain | workstation | server | no_expire_password | auto_locked |
+    enc_text_pw_allowed | smartcard_only | delegation_trust | not_delegated |
+    des_only | no_preauth | password_expired | delegation_auth_trust |
+    no_auth_data | partial_secrets,
+    #{disabled          => {mask, 16#00000001},
+      homedir_req       => {mask, 16#00000002},
+      no_password       => {mask, 16#00000004},
+      temp_dupe         => {mask, 16#00000008},
+      normal            => {mask, 16#00000010}}).
+
 -record(group_membership, {
     relative_id     :: ulong(),
     attributes      :: sid_attrs()
@@ -131,13 +158,13 @@
     primary_group_id        :: ulong(),
     group_count             :: ulong(),
     group_ids               :: pointer(varying_array(#group_membership{})),
-    user_flags              :: ulong(),
+    user_flags              :: user_flags(),
     user_session_key        :: user_session_key(),
     logon_server            :: rpc_unicode_str(),
     logon_domain_name       :: rpc_unicode_str(),
     logon_domain_id         :: pointer(sid()),
     reserved1               :: fixed_array(2, ulong()),
-    user_account_control    :: ulong(),
+    user_account_control    :: samr_uac(),
     sub_auth_status         :: ulong(),
 
     last_successful_ilogon  :: filetime(),
@@ -340,7 +367,7 @@ AAAAAAAAAHb///9B7c6aNIFdOu97yYh0gF0lAAAAAHb////3pTTassAphu/g++URCk8yAAAAAA==">>)
     [#pac_info_buffer{info = Info}] = decode_pac_logon_info(PacInfo),
     io:format("~p\n", [Info]),
     ?assertMatch(#kerb_validation_info{
-        effective_name = "lzhu"
+        effective_name = "lzhua"
         }, Info).
 
 -endif.

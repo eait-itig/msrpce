@@ -49,8 +49,12 @@
 
 -type type_name() :: atom().
 -type record_name() :: atom().
--type rpce_type() :: basic_type() | struct_type() | custom_type() | type_name().
--type custom_type() :: {custom, rpce_type(), expr(), expr()}.
+-type rpce_type() :: basic_type() | struct_type() | bit_type() | 
+    custom_type() | type_name().
+-type custom_type() :: {custom, rpce_type(), expr(), expr()} |
+    {builtin, rpce_type(), expr(), expr()}.
+-type bitnum() :: integer().
+-type bit_type() :: {bitset, int_type(), #{atom() => bitnum()}}.
 -type struct_type() :: {struct, record_name(), [field_spec()]}.
 -type array_type() :: {fixed_array, count(), rpce_type()} |
     {conformant_array, rpce_type()} |
@@ -204,6 +208,8 @@ get_deferred_types(Type) -> tpdedupe(get_deferred_types(Type, [], base)).
 -spec get_deferred_types(rpce_type(), type_path(), atom()) -> [type_path()].
 get_deferred_types({custom, Base, _E, _D}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
+get_deferred_types({bitset, Base, _Bits}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
 get_deferred_types({pointer, Type = {struct, RecName, Fields}}, Path0, _Name) ->
     Path1 = Path0 ++ [RecName],
     FieldTypes = lists:foldl(fun ({FName, FType}, Acc) ->
@@ -251,6 +257,11 @@ resolve_typerefs(T = {fixed_string, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _, _}, _) -> {ok, T};
 resolve_typerefs(unicode, _) -> {ok, unicode};
+resolve_typerefs({bitset, SubType0, Map}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {bitset, SubType1, Map}};
+        Err -> Err
+    end;
 resolve_typerefs({custom, SubType0, Enc, Dec}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
         {ok, SubType1} -> {ok, {custom, SubType1, Enc, Dec}};
@@ -478,6 +489,7 @@ type_align(int8) -> 1;
 type_align(int16) -> 2;
 type_align(int32) -> 4;
 type_align(int64) -> 8;
+type_align({bitset, Base, _Map}) -> type_align(Base);
 type_align({custom, Base, _E, _D}) -> type_align(Base);
 type_align({fixed_array, _, T}) -> type_align(T);
 type_align({array, T}) -> lists:max([ type_align(uint32), type_align(T) ]);
@@ -852,6 +864,30 @@ encode_data(boolean, SrcVar, S0 = #fstate{}) ->
          erl_syntax:clause([erl_syntax:atom(false)], [], [erl_syntax:integer(0)])]),
     int_encode(8, unsigned, IntValExpr, S0);
 
+encode_data({bitset, Base, BitMap}, SrcVar, S0 = #fstate{}) when is_atom(Base) ->
+    {TVar, S1} = inc_tvar(S0),
+    ValExpr = maps:fold(fun (Name, BitNum, Acc) ->
+        Mask = case BitNum of
+            {mask, M} -> M;
+            _ -> 1 bsl BitNum
+        end,
+        Expr = erl_syntax:case_expr(SrcVar,
+            [erl_syntax:clause(
+                [erl_syntax:map_expr([
+                    erl_syntax:map_field_exact(
+                        erl_syntax:atom(Name),
+                        erl_syntax:atom(true))])],
+                [],
+                [erl_syntax:integer(Mask)]),
+             erl_syntax:clause(
+                [erl_syntax:underscore()], [],
+                [erl_syntax:integer(0)])]),
+        erl_syntax:infix_expr(Expr, erl_syntax:operator('bor'), Acc)
+    end, erl_syntax:integer(0), BitMap),
+    Form = erl_syntax:match_expr(TVar, ValExpr),
+    S2 = add_forms([Form], S1),
+    encode_data(Base, TVar, S2);
+
 encode_data(PrimType, SrcVar, S0 = #fstate{}) when is_atom(PrimType) ->
     case PrimType of
         uint8   -> int_encode(8 , unsigned, SrcVar, S0);
@@ -910,6 +946,8 @@ encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
         erl_syntax:application(Enc, [SrcVar])),
     S3 = add_forms([Form], S2),
     encode_unpacks(Base, TVar, S3);
+encode_unpacks({bitset, Base, _Map}, SrcVar, S0 = #fstate{}) when is_atom(Base) ->
+    S0;
 encode_unpacks({conformant_array, _Type}, SrcVar, S0 = #fstate{}) ->
     MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
         [SrcVar]),
@@ -1157,6 +1195,26 @@ decode_data(boolean, DstVar, S0 = #fstate{}) ->
                 [erl_syntax:atom(true)])])),
     add_forms([Form], S2);
 
+decode_data({bitset, Base, BitMap}, DstVar, S0 = #fstate{}) when is_atom(Base) ->
+    {TVar, S1} = inc_tvar(S0),
+    S2 = decode_data(Base, TVar, S1),
+    Fields = maps:fold(fun (Name, BitNum, Acc) ->
+        Mask = case BitNum of
+            {mask, M} -> M;
+            _ -> 1 bsl BitNum
+        end,
+        Expr = erl_syntax:case_expr(
+            erl_syntax:infix_expr(TVar, erl_syntax:operator('band'),
+                erl_syntax:integer(Mask)),
+            [erl_syntax:clause([erl_syntax:integer(0)], [],
+                [erl_syntax:atom(false)]),
+             erl_syntax:clause([erl_syntax:underscore()], [],
+                [erl_syntax:atom(true)])]),
+        [erl_syntax:map_field_assoc(erl_syntax:atom(Name), Expr) | Acc]
+    end, [], BitMap),
+    Form = erl_syntax:match_expr(DstVar, erl_syntax:map_expr(Fields)),
+    add_forms([Form], S2);
+
 decode_data(PrimType, DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
     case PrimType of
         uint8   -> int_decode(8 , unsigned, DstVar, S0);
@@ -1321,6 +1379,8 @@ decode_packs(_Type, _DstVar, S0 = #fstate{}) ->
 
 decode_hoists({custom, Base, _E, _D}, DstVar, S0 = #fstate{}) ->
     decode_hoists(Base, DstVar, S0);
+decode_hoists({bitset, _Base, _Map}, DstVar, S0 = #fstate{}) ->
+    S0;
 decode_hoists(PrimType, _DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
     S0;
 decode_hoists({fixed_string, _N}, _DstVar, S0 = #fstate{}) ->
