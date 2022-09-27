@@ -39,7 +39,7 @@
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
     int8/0, int16/0, int32/0, int64/0,
-    bitset/3, bitslice/3
+    bitset/3, bitslice/3, bitset_mask/3
     ]).
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
@@ -104,9 +104,13 @@
 %% <code>#{BitName => BitNumber :: integer()}</code>, where
 %% <code>BitNumber</code> is 0 for LSB.
 
+-type bitset_mask(_Base, BitName, _MaskMap) :: #{BitName => boolean()}.
+%% Like a <code>bitset()</code> but the map takes masks rather than bit numbers.
+
 -type bitnum() :: integer().
 -type mask() :: integer().
--type bitset_bitmap() :: #{atom() => bitnum() | {mask, mask()}}.
+-type bitset_bitmap() :: #{atom() => bitnum()}.
+-type bitset_maskmap() :: #{atom() => mask()}.
 
 -type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 

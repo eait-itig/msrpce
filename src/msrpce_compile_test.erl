@@ -93,41 +93,61 @@
 
 -type user_session_key() :: msrpce:aligned_bin(16, 4).
 
+% MS-PAC section 2.2.1
 -type sid_attrs() :: msrpce:bitset(
     ulong(),
     mandatory | default | enabled | owner | resource,
-    #{mandatory => 31,
-      default   => 30,
-      enabled   => 29,
-      owner     => 28,
-      resource  => 2}).
+    #{mandatory => 0,
+      default   => 1,
+      enabled   => 2,
+      owner     => 3,
+      resource  => 29}).
 
+% MS-PAC section 2.5
 -type user_flags() :: msrpce:bitset(
     ulong(),
     guest | no_encrypt | lanman_key | subauth_key | machine | ntlmv2_dc |
     profile | extra_sids | resource_groups,
-    #{guest         => 31,
-      no_encrypt    => 30,
-      lanman_key    => 28,
-      subauth_key   => 25,
-      machine       => 24,
-      ntlmv2_dc     => 23,
-      profile       => 21,
-      extra_sids    => 26,
-      resource_groups => 22}).
+    #{guest         => 0,
+      no_encrypt    => 1,
+      lanman_key    => 3,
+      subauth_key   => 6,
+      machine       => 7,
+      ntlmv2_dc     => 8,
+      profile       => 10,
+      extra_sids    => 5,
+      resource_groups => 9}).
 
--type samr_uac() :: msrpce:bitset(
+% MS-SAMR section 2.2.1.12
+-type samr_uac() :: msrpce:bitset_mask(
     ulong(),
     disabled | homedir_req | no_password | temp_dupe | normal | mns_logon |
     interdomain | workstation | server | no_expire_password | auto_locked |
     enc_text_pw_allowed | smartcard_only | delegation_trust | not_delegated |
     des_only | no_preauth | password_expired | delegation_auth_trust |
     no_auth_data | partial_secrets,
-    #{disabled          => {mask, 16#00000001},
-      homedir_req       => {mask, 16#00000002},
-      no_password       => {mask, 16#00000004},
-      temp_dupe         => {mask, 16#00000008},
-      normal            => {mask, 16#00000010}}).
+    #{disabled              => 16#00000001,
+      homedir_req           => 16#00000002,
+      no_password           => 16#00000004,
+      temp_dupe             => 16#00000008,
+      normal                => 16#00000010,
+      mns_logon             => 16#00000020,
+      interdomain           => 16#00000040,
+      workstation           => 16#00000080,
+      server                => 16#00000100,
+      no_expire_password    => 16#00000200,
+      auto_locked           => 16#00000400,
+      enc_text_pw_allowed   => 16#00000800,
+      smartcard_only        => 16#00001000,
+      delegation_trust      => 16#00002000,
+      not_delegated         => 16#00004000,
+      des_only              => 16#00008000,
+      no_preauth            => 16#00010000,
+      password_expired      => 16#00020000,
+      delegation_auth_trust => 16#00040000,
+      no_auth_data          => 16#00080000,
+      partial_secrets       => 16#00100000
+      }).
 
 -record(group_membership, {
     relative_id     :: ulong(),
@@ -367,7 +387,10 @@ AAAAAAAAAHb///9B7c6aNIFdOu97yYh0gF0lAAAAAHb////3pTTassAphu/g++URCk8yAAAAAA==">>)
     [#pac_info_buffer{info = Info}] = decode_pac_logon_info(PacInfo),
     io:format("~p\n", [Info]),
     ?assertMatch(#kerb_validation_info{
-        effective_name = "lzhua"
+        effective_name = "lzhu",
+        user_flags = #{extra_sids := true},
+        user_account_control = #{normal := true},
+        user_id = 2914711
         }, Info).
 
 -endif.
