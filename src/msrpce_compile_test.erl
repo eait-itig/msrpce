@@ -34,6 +34,8 @@
 -include("include/records.hrl").
 -include("include/types.hrl").
 
+-record(dummy, {a, b = 5}).
+
 -record(test1, {
     a :: thing(),
     b :: uint32(),

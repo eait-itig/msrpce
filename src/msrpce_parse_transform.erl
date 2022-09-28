@@ -85,7 +85,9 @@ add_record(Form, S0 = #?MODULE{compiler = C0}) ->
     RecFields = erl_syntax:tuple_elements(RecFieldsTup),
     RecName = erl_syntax:atom_value(RecNameTree),
     FieldTypes = lists:map(fun
-        ({record_field, FieldNameTree, none}) ->
+        % erl_syntax seems to die on its arse if you feed it untyped
+        % record fields?
+        ({tree,record_field,_,{record_field, FieldNameTree, _}}) ->
             FieldName = erl_syntax:atom_value(FieldNameTree),
             {FieldName, untranslatable_type};
         (FieldType) ->
