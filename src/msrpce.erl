@@ -30,11 +30,14 @@
     encode_sid/1, decode_sid/1,
     encode_filetime/1, decode_filetime/1,
     encode_rpc_unicode/1, decode_rpc_unicode/1,
-    uuid_to_string/1, uuid_from_string/1
+    uuid_to_string/1, uuid_from_string/1,
+    encode_ntstatus/1, decode_ntstatus/1,
+    encode_rpc_multi_sz/1, decode_rpc_multi_sz/1,
+    encode_multi_sz/1, decode_multi_sz/1
     ]).
 
 -export_type([
-    sid/0, filetime/0, custom/4, builtin/4
+    sid/0, filetime/0, custom/4, builtin/4, ntstatus/0
     ]).
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
@@ -235,3 +238,43 @@ uuid_from_string(Str0) ->
       (binary_to_integer(iolist_to_binary([TimeHighVerHex]), 16)):16/big,
       (binary_to_integer(iolist_to_binary([ClockSeqHex]), 16)):16/big,
       (binary_to_integer(iolist_to_binary([NodeHex]), 16)):48/big>>.
+
+-type ntstatus() :: {ntstatus:severity(), ntstatus:code() | integer()}.
+%% windows NT status return value
+
+decode_ntstatus(Int) ->
+    Sev = case (Int bsr 30) band 3 of
+        0 -> success;
+        1 -> info;
+        2 -> warn;
+        3 -> error
+    end,
+    Code = ntstatus:int_to_code(Int),
+    {Sev, Code}.
+
+encode_ntstatus({Sev, Code}) ->
+    Int0 = if
+        is_atom(Code) -> ntstatus:code_to_int(Code);
+        is_integer(Code) -> Code
+    end,
+    SevMask = case Sev of
+        success -> 0;
+        info -> 1 bsl 30;
+        warn -> 2 bsl 30;
+        error -> 3 bsl 30
+    end,
+    Int0 bor SevMask.
+
+decode_rpc_multi_sz(#msrpce_multi_sz{value = Arr, nchar = N}) ->
+    N = length(Arr),
+    string:lexemes(Arr, [0]).
+
+encode_rpc_multi_sz(Strings) ->
+    Arr = lists:flatten(lists:join(0, Strings) ++ [0,0]),
+    #msrpce_multi_sz{value = Arr, nchar = length(Arr)}.
+
+decode_multi_sz(Arr) ->
+    string:lexemes(Arr, [0]).
+
+encode_multi_sz(Strings) ->
+    lists:flatten(lists:join(0, Strings) ++ [0,0]).

@@ -81,5 +81,31 @@
     msrpce:filetime(),
     encode_filetime, decode_filetime).
 
+-type dword() :: msrpce:uint32().
+-type qword() :: msrpce:uint64().
+-type word() :: msrpce:uint16().
+-type uchar() :: msrpce:uint8().
+
 -type lpstr() :: pointer(string()).
 -type lpwstr() :: pointer(unicode()).
+
+-type ntstatus() :: msrpce:builtin(
+    msrpce:uint32(),
+    msrpce:ntstatus(),
+    encode_ntstatus, decode_ntstatus).
+
+-type rpc_multi_sz() :: msrpce:builtin(
+    #msrpce_multi_sz{},
+    [string()],
+    encode_rpc_multi_sz, decode_rpc_multi_sz).
+
+-type multi_string() :: msrpce:builtin(
+    msrpce:pointer(msrpce:array(msrpce:uint8())),
+    [string()],
+    encode_multi_sz, decode_multi_sz).
+
+-type multi_unicode() :: msrpce:builtin(
+    msrpce:pointer(msrpce:array(msrpce:uint16())),
+    [string()],
+    encode_multi_sz, decode_multi_sz).
+

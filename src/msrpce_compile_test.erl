@@ -91,6 +91,12 @@
     value :: rpc_unicode_str()
     }).
 
+-record(test10, {
+    status :: ntstatus(),
+    values :: multi_string(),
+    uvalues :: multi_unicode()
+    }).
+
 -type user_session_key() :: msrpce:aligned_bin(16, 4).
 
 % MS-PAC section 2.2.1
@@ -215,6 +221,7 @@
 -rpce_struct(test7).
 -rpce_struct(test8).
 -rpce_struct(test9).
+-rpce_struct(test10).
 
 -rpce_stream({strtest, [test1, test3]}).
 
@@ -357,6 +364,17 @@ stream_test() ->
                    _:32>>, StructData1),
     DeStream = decode_strtest(Data),
     ?assertMatch([Struct1, Struct3], DeStream).
+
+test10_test() ->
+    Struct = #test10{status = {success, 'STATUS_SUCCESS'},
+                     values = ["foo", "bar"],
+                     uvalues = ["test", "what"]},
+    Data = encode_test10(Struct),
+    ?assertMatch(<<0:32/big, 16#00040001:32/big, 16#00080002:32/big,
+        9:32/big, 0:32, 9:32/big, "foo", 0, "bar", 0, 0, 0, 0, 0,
+        11:32/big, 0:32, 11:32/big, 0, $t, 0, $e, 0, $s, 0, $t, 0, 0,
+                                    0, $w, 0, $h, 0, $a, 0, $t, 0, 0,
+                                    0, 0>>, Data).
 
 pac_test() ->
     WholePac = base64:decode(<<"

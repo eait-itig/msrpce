@@ -86,3 +86,8 @@
     xfersyntax = #msrpce_syntax_id{} :: #msrpce_syntax_id{},
     interfaceid = #msrpce_interface_id{} :: #msrpce_interface_id{}
     }).
+
+-record(msrpce_multi_sz, {
+    value :: msrpce:pointer(msrpce:array(msrpce:uint16())),
+    nchar :: msrpce:uint32()
+    }).
