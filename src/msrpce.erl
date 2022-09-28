@@ -37,7 +37,8 @@
     ]).
 
 -export_type([
-    sid/0, filetime/0, custom/4, builtin/4, ntstatus/0
+    sid/0, filetime/0, custom/4, builtin/4, ntstatus/0,
+    le/1, be/1
     ]).
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
@@ -114,6 +115,13 @@
 -type mask() :: integer().
 -type bitset_bitmap() :: #{atom() => bitnum()}.
 -type bitset_maskmap() :: #{atom() => mask()}.
+
+-type le(T) :: T.
+%% Forces the inner type to be little-endian always (ignores the stream
+%% endian options).
+-type be(T) :: T.
+%% Forces the inner type to be big-endian always (ignores the stream
+%% endian option).
 
 -type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 

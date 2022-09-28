@@ -358,7 +358,7 @@ stream_test() ->
     Struct1 = #test1{a = 1, b = 2, c = 3, d = 4},
     Struct3 = #test3{a = 30, b = "hello world"},
     Data = encode_strtest_v1([Struct1, Struct3]),
-    <<1, 16#10, 8:16/little, _:32, Inner/binary>> = Data,
+    <<1, 16#00, 8:16/little, _:32, Inner/binary>> = Data,
     <<I0Len:32/little, _:32, StructData0:I0Len/binary,
       I1Len:32/little, _:32, StructData1:I1Len/binary>> = Inner,
     ?assertMatch(<<1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, StructData0),

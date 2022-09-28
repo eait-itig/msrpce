@@ -158,7 +158,9 @@ type_to_msrpce_type(Form) ->
                         {msrpce, RType} when (RType =:= conformant_array) or
                                              (RType =:= varying_array) or
                                              (RType =:= array) or
-                                             (RType =:= pointer) ->
+                                             (RType =:= pointer) or
+                                             (RType =:= le) or
+                                             (RType =:= be) ->
                             [RefType] =
                                 erl_syntax:type_application_arguments(Form),
                             {RType, type_to_msrpce_type(RefType)};

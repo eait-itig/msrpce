@@ -51,7 +51,8 @@
 -type type_name() :: atom().
 -type record_name() :: atom().
 -type rpce_type() :: basic_type() | struct_type() | bit_type() | 
-    custom_type() | type_name().
+    custom_type() | endian_type() | type_name().
+-type endian_type() :: {le, rpce_type()} | {be, rpce_type()}.
 -type custom_type() :: {custom, rpce_type(), expr(), expr()} |
     {builtin, rpce_type(), expr(), expr()}.
 -type bitnum() :: integer().
@@ -209,6 +210,10 @@ get_deferred_types(Type) -> tpdedupe(get_deferred_types(Type, [], base)).
 -spec get_deferred_types(rpce_type(), type_path(), atom()) -> [type_path()].
 get_deferred_types({custom, Base, _E, _D}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
+get_deferred_types({le, Base}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
+get_deferred_types({be, Base}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
 get_deferred_types({bitset, Base, _Bits}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
 get_deferred_types({pointer, Type = {struct, RecName, Fields}}, Path0, _Name) ->
@@ -266,6 +271,12 @@ resolve_typerefs({bitset, SubType0, Map}, Idx) ->
 resolve_typerefs({custom, SubType0, Enc, Dec}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
         {ok, SubType1} -> {ok, {custom, SubType1, Enc, Dec}};
+        Err -> Err
+    end;
+resolve_typerefs({Endian, SubType0}, Idx) when (Endian =:= le) or
+                                               (Endian =:= be) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {Endian, SubType1}};
         Err -> Err
     end;
 resolve_typerefs({fixed_array, N, SubType0}, Idx) ->
@@ -504,6 +515,8 @@ type_align(varying_string) -> type_align(uint32);
 type_align({fixed_string, _}) -> 1;
 type_align({fixed_binary, _}) -> 1;
 type_align({fixed_binary, _, A}) -> A;
+type_align({le, T}) -> type_align(T);
+type_align({be, T}) -> type_align(T);
 type_align(unicode) -> type_align(uint32);
 type_align({struct, _Rec, Fields}) ->
     lists:max([ type_align(T) || {_Name, T} <- Fields ]).
@@ -680,6 +693,15 @@ str_len_expr(Var) ->
 encode_data({custom, Base, _Enc, _Dec}, SrcVar, S0 = #fstate{customs = C}) ->
     #{SrcVar := TVar} = C,
     encode_data(Base, TVar, S0);
+
+encode_data({le, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => little},
+    S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
+encode_data({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => big},
+    S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
 
 encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
                                                        (T =:= binary) ->
@@ -917,6 +939,14 @@ encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
         erl_syntax:application(Enc, [SrcVar])),
     S3 = add_forms([Form], S2),
     encode_unpacks(Base, TVar, S3);
+encode_unpacks({le, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => little},
+    S1 = encode_unpacks(Base, SrcVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
+encode_unpacks({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => big},
+    S1 = encode_unpacks(Base, SrcVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
 encode_unpacks({bitset, Base, _Map}, SrcVar, S0 = #fstate{}) when is_atom(Base) ->
     S0;
 encode_unpacks({conformant_array, _Type}, SrcVar, S0 = #fstate{}) ->
@@ -1048,6 +1078,15 @@ encode_func_form({struct, RecName, _}, Loc, Opts) ->
 -spec decode_data(rpce_type(), var(), fstate()) -> fstate().
 decode_data({custom, Base, _Enc, _Dec}, DstVar, S0 = #fstate{}) ->
     decode_data(Base, DstVar, S0);
+
+decode_data({le, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => little},
+    S1 = decode_data(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
+decode_data({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => big},
+    S1 = decode_data(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
 
 decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
                                                        (T =:= binary) ->
@@ -1333,6 +1372,14 @@ decode_data(Type = {struct, Record, Fields}, _DstVar, S0 = #fstate{}) ->
 
 decode_packs({custom, Base, _E, _D}, DstVar, S0 = #fstate{}) ->
     decode_packs(Base, DstVar, S0);
+decode_packs({le, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => little},
+    S1 = decode_packs(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
+decode_packs({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => big},
+    S1 = decode_packs(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
 decode_packs({struct, Record, Fields}, DstVar, S0 = #fstate{}) ->
     S1 = push_struct(Record, S0),
     #fstate{ctx = Ctx, unpacks = U} = S1,
@@ -1358,6 +1405,14 @@ decode_packs(_Type, _DstVar, S0 = #fstate{}) ->
 
 decode_hoists({custom, Base, _E, _D}, DstVar, S0 = #fstate{}) ->
     decode_hoists(Base, DstVar, S0);
+decode_hoists({le, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => little},
+    S1 = decode_hoists(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
+decode_hoists({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
+    Opts1 = Opts0#{endian => big},
+    S1 = decode_hoists(Base, DstVar, S0#fstate{opts = Opts1}),
+    S1#fstate{opts = Opts0};
 decode_hoists({bitset, _Base, _Map}, DstVar, S0 = #fstate{}) ->
     S0;
 decode_hoists(PrimType, _DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
@@ -1416,6 +1471,11 @@ decode_finish({custom, Base, _E, Dec}, SrcVar, DstVar, S0 = #fstate{}) ->
     Form = erl_syntax:match_expr(DstVar,
         erl_syntax:application(Dec, [TVar])),
     add_forms([Form], S2);
+
+decode_finish({le, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
+    decode_finish(Base, SrcVar, DstVar, S0);
+decode_finish({be, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
+    decode_finish(Base, SrcVar, DstVar, S0);
 
 decode_finish({ArrType, _MembType}, SrcVar, DstVar, S0 = #fstate{})
         when (ArrType =:= array) or (ArrType =:= fixed_array) or
@@ -1658,11 +1718,11 @@ decode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
     CTEFields = case Ver of
         1 -> [
             erl_syntax:record_field(erl_syntax:atom(hdrlen),
-                erl_syntax:integer(16#0800))
+                erl_syntax:integer(16#08))
             ];
         2 -> [
             erl_syntax:record_field(erl_syntax:atom(hdrlen),
-                erl_syntax:integer(16#4000)),
+                erl_syntax:integer(16#40)),
             erl_syntax:record_field(erl_syntax:atom(xfersyntax),
                 erl_syntax:record_expr(erl_syntax:atom(msrpce_syntax_id), [
                     erl_syntax:record_field(erl_syntax:atom(version),
@@ -1673,12 +1733,17 @@ decode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
                     ]))
             ]
     end,
+    Endian = maps:get(endian, Opts, big),
+    EndianNum = case Endian of
+        little -> 16#10;
+        big    -> 16#00
+    end,
     FF2 = erl_syntax:match_expr(
         erl_syntax:record_expr(erl_syntax:atom(CteRec), [
             erl_syntax:record_field(erl_syntax:atom(version),
                 erl_syntax:integer(Ver)),
             erl_syntax:record_field(erl_syntax:atom(endian),
-                erl_syntax:integer(16#10))
+                erl_syntax:integer(EndianNum))
             ] ++ CTEFields),
         CteVar),
     S3 = add_forms([FF0, FF1, FF2], S2),
@@ -1723,6 +1788,11 @@ encode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
         2 -> {msrpce_cte_v2, write_privhdr_v2, concat_atoms([encode, Name, v2])}
     end,
     Aliasing = maps:get(pointer_aliasing, Opts, false),
+    Endian = maps:get(endian, Opts, big),
+    EndianNum = case Endian of
+        little -> 16#10;
+        big    -> 16#00
+    end,
     S0 = #fstate{opts = Opts},
     {StructMap, S1} = lists:foldl(fun (Struct, {Acc, SS0}) ->
         {TVar, SS1} = inc_tvar(SS0),
@@ -1741,7 +1811,10 @@ encode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
     FF1 = erl_syntax:match_expr(SV1,
         erl_syntax:application(CteFun,
             [erl_syntax:record_expr(
-                erl_syntax:atom(CteRec), []),
+                erl_syntax:atom(CteRec), [
+                    erl_syntax:record_field(erl_syntax:atom(endian),
+                        erl_syntax:integer(EndianNum))
+                ]),
              SV0])),
     S3 = add_forms([FF0, FF1], S2),
     S4 = lists:foldl(fun ({TVar, Fun}, SS0) ->

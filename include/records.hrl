@@ -73,18 +73,18 @@
 -record(msrpce_cte_v1, {
     version = 1 :: msrpce:uint8(),
     endian = 16#10 :: msrpce:uint8(),
-    hdrlen = 16#0800 :: msrpce:uint16(),    % endian swapped!
+    hdrlen = 16#0008 :: msrpce:le(msrpce:uint16()),
     filler = <<16#CCCCCCCC:32/big>> :: msrpce:fixed_bin(4)
     }).
 
 -record(msrpce_cte_v2, {
     version = 2 :: msrpce:uint8(),
     endian = 16#10 :: msrpce:uint8(),
-    hdrlen = 16#4000 :: msrpce:uint16(),    % endian swapped!
+    hdrlen = 16#0040 :: msrpce:le(msrpce:uint16()),
     endinfo = 16#cccccccc :: msrpce:uint32(),
     reserved = <<16#cccccccc:32/big, 16#cccccccc:32/big, 16#cccccccc:32/big, 16#cccccccc:32/big>> :: msrpce:fixed_bin(16),
-    xfersyntax = #msrpce_syntax_id{} :: #msrpce_syntax_id{},
-    interfaceid = #msrpce_interface_id{} :: #msrpce_interface_id{}
+    xfersyntax = #msrpce_syntax_id{} :: msrpce:le(#msrpce_syntax_id{}),
+    interfaceid = #msrpce_interface_id{} :: msrpce:le(#msrpce_interface_id{})
     }).
 
 -record(msrpce_multi_sz, {
