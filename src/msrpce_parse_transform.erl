@@ -84,17 +84,21 @@ add_record(Form, S0 = #?MODULE{compiler = C0}) ->
     [RecNameTree, RecFieldsTup] = erl_syntax:attribute_arguments(Form),
     RecFields = erl_syntax:tuple_elements(RecFieldsTup),
     RecName = erl_syntax:atom_value(RecNameTree),
-    FieldTypes = lists:map(fun (FieldType) ->
-        FieldNameTree = erl_syntax:typed_record_field_body(FieldType),
-        FieldName = erl_syntax:atom_value(
-            erl_syntax:record_field_name(FieldNameTree)),
-        T = erl_syntax:typed_record_field_type(FieldType),
-        case (catch type_to_msrpce_type(T)) of
-            {'EXIT', _Why} ->
-                {FieldName, {untranslatable_type, T}};
-            RpceType ->
-                {FieldName, RpceType}
-        end
+    FieldTypes = lists:map(fun
+        ({record_field, FieldNameTree, none}) ->
+            FieldName = erl_syntax:atom_value(FieldNameTree),
+            {FieldName, untranslatable_type};
+        (FieldType) ->
+            FieldNameTree = erl_syntax:typed_record_field_body(FieldType),
+            FieldName = erl_syntax:atom_value(
+                erl_syntax:record_field_name(FieldNameTree)),
+            T = erl_syntax:typed_record_field_type(FieldType),
+            case (catch type_to_msrpce_type(T)) of
+                {'EXIT', _Why} ->
+                    {FieldName, {untranslatable_type, T}};
+                RpceType ->
+                    {FieldName, RpceType}
+            end
     end, RecFields),
     Type = {struct, RecName, FieldTypes},
     {ok, C1} = msrpce_compiler:define_type(RecName, Type, C0),
