@@ -34,7 +34,7 @@
 
 -record(msrpce_state, {
     mode :: encode | decode,
-    context = [] :: [atom() | {atom(), atom()}],
+    aliasing :: boolean(),
     offset = 0 :: integer(),
     data :: binary(),
     referents = gb_sets:new() :: gb_sets:set(msrpce_runtime:referent()),
@@ -56,7 +56,7 @@
 -record(msrpce_unicode_string, {
     len :: msrpce:uint16(),
     maxlen :: msrpce:uint16(),
-    str :: msrpce:pointer(msrpce:unicode())
+    str :: msrpce:pointer(msrpce:array(msrpce:uint16()))
     }).
 
 -record(msrpce_syntax_id, {

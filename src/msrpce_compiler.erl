@@ -41,7 +41,8 @@
 
 -type loc() :: erl_syntax:annotation_or_location().
 -type options() :: #{
-    endian => big | little
+    endian => big | little,
+    pointer_aliasing => boolean()
     }.
 -type type_options() :: options() | #{
     location => loc()
@@ -138,8 +139,8 @@ compile_type(Name, TOpts, S0 = #?MODULE{types = T0, funcs = F0, opts = Opts}) ->
                         FForm = decode_finish_func_form(Path, FType, L, Opts),
                         [EForm, DForm, FForm | Acc]
                     end, F0, ToCompile),
-                    EForm = encode_func_form(Type1, L),
-                    DForm = decode_func_form(Type1, L),
+                    EForm = encode_func_form(Type1, L, Opts),
+                    DForm = decode_func_form(Type1, L, Opts),
                     F2 = [EForm, DForm | F1],
                     {ok, S0#?MODULE{funcs = F2, sgen = SG1}};
                 {ok, Other} ->
@@ -686,34 +687,22 @@ encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
     {TVar, S1} = inc_tvar(S0),
     F0 = erl_syntax:match_expr(TVar, str_len_expr(SrcVar)),
     S2 = add_forms([F0], S1),
-    % max count = length(Input) + 1
-    LenExpr = case T of
-        string ->
-            erl_syntax:infix_expr(TVar,
-                erl_syntax:operator('+'), erl_syntax:integer(1));
-        binary ->
-            TVar
-    end,
-    F1 = erl_syntax:binary_field(LenExpr,
+    % max count = length(Input)
+    F1 = erl_syntax:binary_field(TVar,
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % offset = 0
     F2 = erl_syntax:binary_field(erl_syntax:integer(0),
         erl_syntax:integer(32), []),
-    % actual count = length(Input) + 1
-    F3 = erl_syntax:binary_field(LenExpr,
+    % actual count = length(Input)
+    F3 = erl_syntax:binary_field(TVar,
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % string data
     DataExpr = erl_syntax:application(erl_syntax:atom(iolist_to_binary),
         [erl_syntax:list([SrcVar])]),
     F4 = erl_syntax:binary_field(DataExpr, [erl_syntax:atom(binary)]),
-    % terminator
-    F5s = case T of
-        string -> [erl_syntax:binary_field(erl_syntax:integer(0))];
-        binary -> []
-    end,
     OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
-        erl_syntax:operator('+'), LenExpr),
-    add_encode_step(4, [F1, F2, F3, F4] ++ F5s, OffsetInc, S2);
+        erl_syntax:operator('+'), TVar),
+    add_encode_step(4, [F1, F2, F3, F4], OffsetInc, S2);
 
 encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= varying_string) or
                                                        (T =:= varying_binary) ->
@@ -721,31 +710,16 @@ encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= varying_string) or
     {TVar, S1} = inc_tvar(S0),
     F0 = erl_syntax:match_expr(TVar, str_len_expr(SrcVar)),
     S2 = add_forms([F0], S1),
-    % offset = 0
-    F1 = erl_syntax:binary_field(erl_syntax:integer(0),
-        erl_syntax:integer(32), []),
-    % actual count = length(Input) + 1
-    LenExpr = case T of
-        varying_string ->
-            erl_syntax:infix_expr(TVar,
-                erl_syntax:operator('+'), erl_syntax:integer(1));
-        varying_binary ->
-            TVar
-    end,
-    F2 = erl_syntax:binary_field(LenExpr,
+    % actual count = length(Input)
+    F1 = erl_syntax:binary_field(TVar,
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % string data
     DataExpr = erl_syntax:application(erl_syntax:atom(iolist_to_binary),
         [erl_syntax:list([SrcVar])]),
-    F3 = erl_syntax:binary_field(DataExpr, [erl_syntax:atom(binary)]),
-    % terminator
-    F4s = case T of
-        varying_string -> [erl_syntax:binary_field(erl_syntax:integer(0))];
-        varying_binary -> []
-    end,
-    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
-        erl_syntax:operator('+'), LenExpr),
-    add_encode_step(4, [F1, F2, F3] ++ F4s, OffsetInc, S2);
+    F2 = erl_syntax:binary_field(DataExpr, [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4),
+        erl_syntax:operator('+'), TVar),
+    add_encode_step(4, [F1, F2], OffsetInc, S2);
 
 encode_data(unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
     Endian = maps:get(endian, Opts, big),
@@ -757,18 +731,15 @@ encode_data(unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
              erl_syntax:tuple(
                 [erl_syntax:atom(utf16), erl_syntax:atom(little)])
             ])),
-    % max count = string:length(Input) + 1
-    LenExpr = erl_syntax:infix_expr(
-        erl_syntax:application(
-            erl_syntax:atom(string), erl_syntax:atom(length),
-            [SrcVar]),
-        erl_syntax:operator('+'), erl_syntax:integer(1)),
+    % max count = string:length(Input)
+    LenExpr = erl_syntax:application(
+            erl_syntax:atom(string), erl_syntax:atom(length), [SrcVar]),
     F1 = erl_syntax:binary_field(LenExpr,
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % offset = 0
     F2 = erl_syntax:binary_field(erl_syntax:integer(0),
         erl_syntax:integer(32), []),
-    % actual count = string:length(Input) + 1
+    % actual count = string:length(Input)
     F3 = erl_syntax:binary_field(erl_syntax:application(
             erl_syntax:atom(string), erl_syntax:atom(length),
             [SrcVar]),
@@ -842,7 +813,7 @@ encode_data({varying_array, Type}, SrcVar, S0 = #fstate{opts = Opts}) ->
     % actual count
     F0 = erl_syntax:binary_field(LenExpr, erl_syntax:integer(32),
         [erl_syntax:atom(Endian)]),
-    S1 = add_encode_step(4, [F0], 8, S0),
+    S1 = add_encode_step(4, [F0], 4, S0),
     encode_data({conformant_array, Type}, SrcVar, S1);
 
 encode_data({array, Type}, SrcVar, S0 = #fstate{opts = Opts}) ->
@@ -1046,12 +1017,15 @@ encode_struct_func_form(Path0, Type, Loc, Opts) ->
     F1 = erl_syntax:revert(F0),
     set_anno(Loc, erl_syntax:atom_value(FunName), F1).
 
-encode_func_form({struct, RecName, _}, Loc) ->
+encode_func_form({struct, RecName, _}, Loc, Opts) ->
     InVar = erl_syntax:variable('Input'),
+    Aliasing = maps:get(pointer_aliasing, Opts, false),
     FF0 = erl_syntax:match_expr(svar(0),
         erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
             [erl_syntax:record_field(erl_syntax:atom(mode),
                 erl_syntax:atom(encode)),
+             erl_syntax:record_field(erl_syntax:atom(aliasing),
+                erl_syntax:atom(Aliasing)),
              erl_syntax:record_field(erl_syntax:atom(data),
                 erl_syntax:binary([]))])),
     FF1 = erl_syntax:match_expr(svar(1),
@@ -1103,32 +1077,19 @@ decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
             erl_syntax:binary_field(UnsplitVar, [erl_syntax:atom(binary)])
             ]),
         RestVar),
-    LenExpr = case T of
-        string ->
-            erl_syntax:infix_expr(LenVar,
-                erl_syntax:operator('-'), erl_syntax:integer(1));
-        binary ->
-            LenVar
-    end,
-    InnerField0 = erl_syntax:binary_field(SplitVar, LenExpr,
+    InnerField0 = erl_syntax:binary_field(SplitVar, LenVar,
         [erl_syntax:atom(binary)]),
-    InnerFields1 = case T of
-        string ->
-            [erl_syntax:binary_field(erl_syntax:integer(0))];
-        binary ->
-            []
-    end,
-    InnerField2 = erl_syntax:binary_field(erl_syntax:underscore(),
+    InnerField1 = erl_syntax:binary_field(erl_syntax:underscore(),
         [erl_syntax:atom(binary)]),
     Form1 = erl_syntax:match_expr(
-        erl_syntax:binary([InnerField0] ++ InnerFields1 ++ [InnerField2]),
+        erl_syntax:binary([InnerField0, InnerField1]),
         UnsplitVar),
     Form2 = case T of
         string ->
-            erl_syntax:match_expr(
-                DstVar,
-                erl_syntax:application(erl_syntax:atom(binary_to_list),
-                    [SplitVar]));
+            erl_syntax:match_expr(DstVar,
+                erl_syntax:application(erl_syntax:atom(unicode),
+                    erl_syntax:atom(characters_to_list),
+                    [SplitVar, erl_syntax:atom(utf8)]));
         binary ->
             erl_syntax:match_expr(DstVar, SplitVar)
     end,
@@ -1180,9 +1141,27 @@ decode_data(unicode, DstVar, S0 = #fstate{opts = Opts}) ->
                 erl_syntax:atom(utf16), erl_syntax:atom(little)])])),
     add_forms([Form0, Form1, Form2], S7);
 
-decode_data(varying_string, DstVar, S0 = #fstate{}) ->
-    Form = erl_syntax:match_expr(DstVar, erl_syntax:atom(undefined)),
-    add_forms([Form], S0);
+decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= varying_string) or
+                                                       (T =:= varying_binary) ->
+    Endian = maps:get(endian, Opts, big),
+    {LenVar, S1} = inc_tvar(S0),
+    {SplitVar, S2} = inc_tvar(S1),
+    F0 = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    F1 = erl_syntax:binary_field(SplitVar, LenVar, [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4),
+        erl_syntax:operator('+'), LenVar),
+    S3 = add_decode_step(4, [F0, F1], OffsetInc, S2),
+    Form = case T of
+        varying_string ->
+            erl_syntax:match_expr(DstVar,
+                erl_syntax:application(erl_syntax:atom(unicode),
+                    erl_syntax:atom(characters_to_list),
+                    [SplitVar, erl_syntax:atom(utf8)]));
+        varying_binary ->
+            erl_syntax:match_expr(DstVar, SplitVar)
+    end,
+    add_forms([Form], S3);
 
 decode_data(boolean, DstVar, S0 = #fstate{}) ->
     {TVar, S1} = inc_tvar(S0),
@@ -1589,12 +1568,15 @@ decode_finish_func_form(Path0, Type, Loc, Opts) ->
     F1 = erl_syntax:revert(F0),
     set_anno(Loc, erl_syntax:atom_value(FunName), F1).
 
-decode_func_form({struct, RecName, _}, Loc) ->
+decode_func_form({struct, RecName, _}, Loc, Opts) ->
     InVar = erl_syntax:variable('Input'),
+    Aliasing = maps:get(pointer_aliasing, Opts, false),
     FF0 = erl_syntax:match_expr(svar(0),
         erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
             [erl_syntax:record_field(erl_syntax:atom(mode),
                 erl_syntax:atom(decode)),
+             erl_syntax:record_field(erl_syntax:atom(aliasing),
+                erl_syntax:atom(Aliasing)),
              erl_syntax:record_field(erl_syntax:atom(data),
                 InVar)])),
     FF1 = erl_syntax:match_expr(
@@ -1651,6 +1633,7 @@ decode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
         1 -> {msrpce_cte_v1, read_privhdr_v1, concat_atoms([decode, Name, v1])};
         2 -> {msrpce_cte_v2, read_privhdr_v2, concat_atoms([decode, Name, v2])}
     end,
+    Aliasing = maps:get(pointer_aliasing, Opts, false),
     InVar = erl_syntax:variable('Input'),
     S0 = #fstate{opts = Opts},
     {StructMap, S1} = lists:foldl(fun (Struct, {Acc, SS0}) ->
@@ -1662,6 +1645,8 @@ decode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
         erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
             [erl_syntax:record_field(erl_syntax:atom(mode),
                 erl_syntax:atom(decode)),
+             erl_syntax:record_field(erl_syntax:atom(aliasing),
+                erl_syntax:atom(Aliasing)),
              erl_syntax:record_field(erl_syntax:atom(data),
                 InVar)])),
     CteVar = erl_syntax:variable('CTE'),
@@ -1737,6 +1722,7 @@ encode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
         1 -> {msrpce_cte_v1, write_privhdr_v1, concat_atoms([encode, Name, v1])};
         2 -> {msrpce_cte_v2, write_privhdr_v2, concat_atoms([encode, Name, v2])}
     end,
+    Aliasing = maps:get(pointer_aliasing, Opts, false),
     S0 = #fstate{opts = Opts},
     {StructMap, S1} = lists:foldl(fun (Struct, {Acc, SS0}) ->
         {TVar, SS1} = inc_tvar(SS0),
@@ -1747,6 +1733,8 @@ encode_stream_func_form(Ver, Name, Structs, Loc, Opts) ->
         erl_syntax:record_expr(erl_syntax:atom(msrpce_state),
             [erl_syntax:record_field(erl_syntax:atom(mode),
                 erl_syntax:atom(encode)),
+             erl_syntax:record_field(erl_syntax:atom(aliasing),
+                erl_syntax:atom(Aliasing)),
              erl_syntax:record_field(erl_syntax:atom(data),
                 erl_syntax:binary([]))])),
     CteFun = enc_fun_name([CteRec]),

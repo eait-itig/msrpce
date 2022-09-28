@@ -52,7 +52,7 @@
 -type sid() :: [integer()].
 %% A Microsoft Security Identifier (SID) in numeric form (e.g. [1,5,1234,123])
 
--type time_unit() :: microsecond | millisecond | second.
+-type time_unit() :: decimicrosecond | microsecond | millisecond | second.
 -type filetime() :: null | never | {integer(), time_unit()}.
 %% Common time specification format used in MSRPCE
 
@@ -157,9 +157,11 @@ encode_filetime(null) ->
     <<0:64>>;
 encode_filetime(never) ->
     <<16#7fffffffffffffff:64/little>>;
-encode_filetime({N, microsecond}) ->
-    V = (N * 10) + 116444736000000000,
+encode_filetime({N, decimicrosecond}) ->
+    V = N + 116444736000000000,
     <<V:64/little>>;
+encode_filetime({N, microsecond}) ->
+    encode_filetime({N * 10, decimicrosecond});
 encode_filetime({N, millisecond}) ->
     encode_filetime({N * 1000, microsecond});
 encode_filetime({N, second}) ->
@@ -169,19 +171,25 @@ encode_filetime({N, second}) ->
 decode_filetime(<<0:64>>) -> null;
 decode_filetime(<<16#7fffffffffffffff:64/little>>) -> never;
 decode_filetime(<<V:64/little>>) ->
-    USec = (V - 116444736000000000) div 10,
-    case (USec rem 1000) of
+    DUSec = V - 116444736000000000,
+    case (DUSec rem 10) of
         0 ->
-            MSec = USec div 1000,
-            case (MSec rem 1000) of
+            USec = DUSec div 10,
+            case (USec rem 1000) of
                 0 ->
-                    Sec = MSec div 1000,
-                    {Sec, second};
+                    MSec = USec div 1000,
+                    case (MSec rem 1000) of
+                        0 ->
+                            Sec = MSec div 1000,
+                            {Sec, second};
+                        _ ->
+                            {MSec, millisecond}
+                    end;
                 _ ->
-                    {MSec, millisecond}
+                    {USec, microsecond}
             end;
         _ ->
-            {USec, microsecond}
+            {DUSec, decimicrosecond}
     end.
 
 -spec encode_rpc_unicode(string()) -> #msrpce_unicode_string{}.

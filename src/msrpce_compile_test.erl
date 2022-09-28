@@ -205,7 +205,7 @@
     info            :: pointer(#kerb_validation_info{})
     }).
 
--rpce(#{endian => big}).
+-rpce(#{endian => big, pointer_aliasing => true}).
 -rpce_struct(what).
 -rpce_struct(test2).
 -rpce_struct(test3).
@@ -218,7 +218,7 @@
 
 -rpce_stream({strtest, [test1, test3]}).
 
--rpce(#{endian => little}).
+-rpce(#{endian => little, pointer_aliasing => false}).
 -rpce_stream({pac_logon_info, [pac_info_buffer]}).
 
 test1_test() ->
@@ -233,7 +233,7 @@ test2_test() ->
                     b = #test1{a = 1, b = 2, c = 3, d = 4},
                     c = -123},
     Data = encode_test2(Struct),
-    ?assertMatch(<<61:32/big, 1:32/big, (-123):32/big-signed,
+    ?assertMatch(<<61:32/big, 16#00040001:32/big, (-123):32/big-signed,
         0:32, 1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, Data),
     DeStruct = decode_test2(Data),
     ?assertMatch(Struct, DeStruct).
@@ -241,13 +241,13 @@ test2_test() ->
 test3_test() ->
     Struct = #test3{a = 30, b = "hello world"},
     Data = encode_test3(Struct),
-    ?assertMatch(<<30, 0:24, 12:32/big, 0:32, 12:32/big, "hello world", 0>>,
+    ?assertMatch(<<30, 0:24, 11:32/big, 0:32, 11:32/big, "hello world">>,
         Data),
     DeStruct = decode_test3(Data),
     ?assertMatch(Struct, DeStruct).
 
 test3_offset_test() ->
-    Data = <<30, 0:24, 16:32/big, 2:32/big, 12:32/big, 0, 0, "hello world", 0, 0, 0>>,
+    Data = <<30, 0:24, 16:32/big, 2:32/big, 11:32/big, 0, 0, "hello world", 0, 0, 0>>,
     DeStruct = decode_test3(Data),
     ?assertMatch(#test3{a = 30, b = "hello world"}, DeStruct).
 
@@ -279,8 +279,8 @@ test6_test() ->
     Data = encode_test6(Struct),
     ?assertMatch(<<2:32/big, 31:16/big, 0:16,
         0:32, 2:32/big,
-        3, 0:24, 6:32/big, 0:32, 6:32/big, "hello", 0, 0:16,
-        4, 0:24, 6:32/big, 0:32, 6:32/big, "world", 0, 0:16,
+        3, 0:24, 5:32/big, 0:32, 5:32/big, "hello", 0, 0, 0,
+        4, 0:24, 5:32/big, 0:32, 5:32/big, "world", 0, 0, 0,
         123145:32/big>>, Data),
     DeStruct = decode_test6(Data),
     ?assertMatch(Struct, DeStruct).
@@ -289,10 +289,10 @@ test7_test() ->
     Struct = #test7{c = 31, d = 123145, as = [
         #test3{a=3,b="hello"}, #test3{a=4,b="world"}]},
     Data = encode_test7(Struct),
-    ?assertMatch(<<31:16/big, 0:16, 1:32/big, 123145:32/big,
+    ?assertMatch(<<31:16/big, 0:16, 16#00040001:32/big, 123145:32/big,
         2:32/big, 0:32, 2:32/big,
-        3, 0:24, 6:32/big, 0:32, 6:32/big, "hello", 0, 0:16,
-        4, 0:24, 6:32/big, 0:32, 6:32/big, "world", 0>>, Data),
+        3, 0:24, 5:32/big, 0:32, 5:32/big, "hello", 0, 0, 0,
+        4, 0:24, 5:32/big, 0:32, 5:32/big, "world">>, Data),
     DeStruct = decode_test7(Data),
     ?assertMatch(Struct, DeStruct).
 
@@ -301,10 +301,11 @@ test8_test() ->
         #test3{a=3,b="hello"}, #test3{a=3,b="hello"}, #test3{a=4,b="hello"}]},
     Data = encode_test8(Struct),
     ?assertMatch(<<5:32/big,
-        1:32/big, 2:32/big, 1:32/big, 1:32/big, 3:32/big,
-        3, 0:24, 6:32/big, 0:32, 6:32/big, "hello", 0, 0:16,
-        4, 0:24, 6:32/big, 0:32, 6:32/big, "world", 0, 0:16,
-        4, 0:24, 6:32/big, 0:32, 6:32/big, "hello", 0>>, Data),
+        16#00040001:32/big, 16#00080002:32/big, 16#00040001:32/big,
+        16#00040001:32/big, 16#00140003:32/big,
+        3, 0:24, 5:32/big, 0:32, 5:32/big, "hello", 0, 0, 0,
+        4, 0:24, 5:32/big, 0:32, 5:32/big, "world", 0, 0, 0,
+        4, 0:24, 5:32/big, 0:32, 5:32/big, "hello">>, Data),
     DeStruct = decode_test8(Data),
     ?assertMatch(Struct, DeStruct).
 
@@ -323,10 +324,10 @@ test9_test() ->
         1, 3, 5:48/big, 1:32/big, 2:32/big, 3:32/big,
         1, 4, 5:48/big, 1:32/big, 2:32/big, 3:32/big, 56:32/big,
         (5*1000*1000*10 + 116444736000000000):64/little,
-        10:16/big, 10:16/big, 1:32/big,
-        10:16/big, 10:16/big, 2:32/big,
-        6:32/big, 0:32, 5:32/big, $h, 0, $e, 0, $l, 0, $l, 0, $o, 0, 0, 0,
-        6:32/big, 0:32, 5:32/big, $w, 0, $o, 0, $r, 0, $l, 0, $d, 0, 0, 0>>,
+        10:16/big, 10:16/big, 16#00500001:32/big,
+        10:16/big, 10:16/big, 16#00580002:32/big,
+        5:32/big, 0:32, 5:32/big, 0, $h, 0, $e, 0, $l, 0, $l, 0, $o, 0, 0,
+        5:32/big, 0:32, 5:32/big, 0, $w, 0, $o, 0, $r, 0, $l, 0, $d>>,
         Data),
     DeStruct = decode_test9(Data),
     ?assertMatch(Struct, DeStruct).
@@ -352,7 +353,7 @@ stream_test() ->
     <<I0Len:32/little, _:32, StructData0:I0Len/binary,
       I1Len:32/little, _:32, StructData1:I1Len/binary>> = Inner,
     ?assertMatch(<<1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, StructData0),
-    ?assertMatch(<<30, 0:24, 12:32/big, 0:32, 12:32/big, "hello world", 0,
+    ?assertMatch(<<30, 0:24, 11:32/big, 0:32, 11:32/big, "hello world", _,
                    _:32>>, StructData1),
     DeStream = decode_strtest(Data),
     ?assertMatch([Struct1, Struct3], DeStream).
@@ -385,12 +386,14 @@ AAEFAAAAAAAFFQAAAFlRuBdmcl0lZGM7Cy9bLgAFAAAAAQUAAAAAAAUVAAAAWVG4F2ZyXSVkYzsL
 AAAAAAAAAHb///9B7c6aNIFdOu97yYh0gF0lAAAAAHb////3pTTassAphu/g++URCk8yAAAAAA==">>),
     PacInfo = binary:part(WholePac, 16#5E, 16#4B0),
     [#pac_info_buffer{info = Info}] = decode_pac_logon_info(PacInfo),
-    io:format("~p\n", [Info]),
     ?assertMatch(#kerb_validation_info{
         effective_name = "lzhu",
         user_flags = #{extra_sids := true},
         user_account_control = #{normal := true},
         user_id = 2914711
-        }, Info).
+        }, Info),
+    PacInfo2 = encode_pac_logon_info([#pac_info_buffer{info = Info}]),
+    ?assertMatch([#pac_info_buffer{info = Info}],
+        decode_pac_logon_info(PacInfo2)).
 
 -endif.

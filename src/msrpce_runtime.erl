@@ -126,13 +126,14 @@ write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
                                                        defer_by_ref = Refs0,
                                                        defer_by_val = Vals0,
                                                        referents = RefSet0}) ->
-    #msrpce_state{mode = encode} = S0,
+    #msrpce_state{mode = encode, aliasing = Aliasing} = S0,
     case Vals0 of
-        #{V := Ref} ->
+        #{V := Ref} when Aliasing ->
             D1 = <<D0/binary, Ref:32/big-unsigned>>,
             S0#msrpce_state{data = D1, offset = O0 + 4};
         _ ->
-            Ref = maps:size(Refs0) + 1,
+            Ref = ((O0 band 16#FFFF) bsl 16) bor
+                ((maps:size(Refs0) + 1) band 16#FFFF),
             Defer = #msrpce_defer{referent = Ref,
                                   typename = TypeName,
                                   func = Func,

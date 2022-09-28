@@ -73,9 +73,9 @@ transform(attribute, Form, S0 = #?MODULE{}) ->
     end;
 transform(eof_marker, Form, S0 = #?MODULE{compiler = C0}) ->
     FuncForms = msrpce_compiler:func_forms(C0),
-    lists:foreach(fun (FForm) ->
-      io:format("~s\n", [erl_pp:form(FForm)])
-    end, lists:reverse(FuncForms)),
+    %lists:foreach(fun (FForm) ->
+    %  io:format("~s\n", [erl_pp:form(FForm)])
+    %end, lists:reverse(FuncForms)),
     {FuncForms ++ [Form], S0};
 transform(_Type, Form, S0) ->
     {[Form], S0}.

@@ -80,3 +80,6 @@
     msrpce:aligned_bin(8, 4),
     msrpce:filetime(),
     encode_filetime, decode_filetime).
+
+-type lpstr() :: pointer(string()).
+-type lpwstr() :: pointer(unicode()).
