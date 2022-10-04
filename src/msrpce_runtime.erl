@@ -89,7 +89,7 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
                                                    referents = RefSet0}) ->
     #msrpce_state{mode = decode} = S0,
     case D0 of
-        <<Ref:32/big-unsigned, D1/binary>> ->
+        <<Ref:32/little-unsigned, D1/binary>> ->
             case Ref of
                 0 ->
                     {#msrpce_ptr{referent = 0},
@@ -129,11 +129,10 @@ write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
     #msrpce_state{mode = encode, aliasing = Aliasing} = S0,
     case Vals0 of
         #{V := Ref} when Aliasing ->
-            D1 = <<D0/binary, Ref:32/big-unsigned>>,
+            D1 = <<D0/binary, Ref:32/little-unsigned>>,
             S0#msrpce_state{data = D1, offset = O0 + 4};
         _ ->
-            Ref = ((O0 band 16#FFFF) bsl 16) bor
-                ((maps:size(Refs0) + 1) band 16#FFFF),
+            Ref = 16#20000 bor (maps:size(Refs0) bsl 2),
             Defer = #msrpce_defer{referent = Ref,
                                   typename = TypeName,
                                   func = Func,
@@ -142,7 +141,7 @@ write_ptr(TypeName, Align, Func, V, S0 = #msrpce_state{data = D0,
             Refs1 = Refs0#{Ref => Defer},
             Vals1 = Vals0#{V => Ref},
             RefSet1 = gb_sets:add_element(Ref, RefSet0),
-            D1 = <<D0/binary, Ref:32/big-unsigned>>,
+            D1 = <<D0/binary, Ref:32/little-unsigned>>,
             S0#msrpce_state{data = D1, defer_by_ref = Refs1, offset = O0 + 4,
                             defer_by_val = Vals1, referents = RefSet1}
     end.
