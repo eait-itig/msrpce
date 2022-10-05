@@ -722,30 +722,38 @@ encode_data({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
 
-encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
+encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
     #fstate{ctx = Ctx0, unpacks = U} = S0,
     [{field, _ThisField} | Ctx1] = Ctx0,
     #{Ctx1 := FieldMap} = U,
-    #{Field := {_Type, RealVar}} = FieldMap,
+    #{Field := {_Type, RealVar0}} = FieldMap,
+    RealVar1 = case C of
+        #{RealVar0 := Alias} -> Alias;
+        _ -> RealVar0
+    end,
     {TVar, S1} = inc_tvar(S0),
     F = erl_syntax:match_expr(TVar,
-        erl_syntax:application(erl_syntax:atom(length), [RealVar])),
+        erl_syntax:application(erl_syntax:atom(length), [RealVar1])),
     S2 = add_forms([F], S1),
     encode_data(Base, TVar, S2);
-encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
+encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
     #fstate{ctx = Ctx0, unpacks = U} = S0,
     [{field, _ThisField} | Ctx1] = Ctx0,
     #{Ctx1 := FieldMap} = U,
-    #{Field := {RealType, RealVar}} = FieldMap,
+    #{Field := {RealType, RealVar0}} = FieldMap,
+    RealVar1 = case C of
+        #{RealVar0 := Alias} -> Alias;
+        _ -> RealVar0
+    end,
     RefType0 = case RealType of
         {custom, {pointer, T}, _E, _D} -> T;
         {pointer, T} -> T;
         _ -> error({not_implemented, {size_of, RealType}})
     end,
     RefType1 = case RefType0 of
-        {custom, Base, _Enc, _Dec} -> Base;
-        {le, Base} -> Base;
-        {be, Base} -> Base;
+        {custom, Base2, _Enc, _Dec} -> Base2;
+        {le, Base2} -> Base2;
+        {be, Base2} -> Base2;
         Other -> Other
     end,
     {Fun, Subtract} = case RefType1 of
@@ -767,7 +775,7 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
     {TVar, S1} = inc_tvar(S0),
     Expr0 = erl_syntax:application(
         erl_syntax:atom(msrpce_runtime), erl_syntax:atom(size_of),
-        [Fun, RealVar]),
+        [Fun, RealVar1]),
     Expr1 = case Subtract of
         0 -> Expr0;
         _ -> erl_syntax:infix_expr(Expr0, erl_syntax:operator('-'),

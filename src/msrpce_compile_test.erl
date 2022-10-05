@@ -101,8 +101,15 @@
     uvalues :: multi_unicode()
     }).
 
+-type abc() :: msrpce:custom(pointer(binary()), integer(), encode_abc, decode_abc).
+
+encode_abc(Int) ->
+    <<"abc", (integer_to_binary(Int))/binary>>.
+decode_abc(<<"abc", IntBin/binary>>) ->
+    binary_to_integer(IntBin).
+
 -record(test11, {
-    bin :: pointer(binary()),
+    bin :: abc(),
     sz :: size_of(bin, ulong())
     }).
 
@@ -391,7 +398,7 @@ test10_test() ->
                                     0, 0>>, Data).
 
 test11_test() ->
-    Struct = #test11{bin = <<"abc123">>},
+    Struct = #test11{bin = 123},
     Data = encode_test11(Struct),
     ?assertMatch(<<16#00020000:32/little, 6:32/little,
         6:32/little, 0:32, 6:32/little, "abc123">>, Data).
