@@ -24,6 +24,7 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
+%% @doc Internal compiler interface used by {@link msrpce_parse_transform}.
 -module(msrpce_compiler).
 
 -export([
@@ -40,10 +41,31 @@
     ]).
 
 -type loc() :: erl_syntax:annotation_or_location().
+%% A source location, used as an annotation to make sure compiler errors have
+%% a line number and filename.
+
 -type options() :: #{
     endian => big | little,
     pointer_aliasing => boolean()
-    }.
+    }. %%
+%% Compiler options, which determine how structures and streams will be
+%% compiled.
+%% <table>
+%%   <tr>
+%%     <td><code>endian</code></td>
+%%     <td><code>big | little</code></td>
+%%     <td>Sets the endianness (byte order) of all multi-byte integers.</td>
+%%   </tr>
+%%   <tr>
+%%     <td><code>pointer_aliasing</code></td>
+%%     <td><code>boolean()</code></td>
+%%     <td>If <code>true</code>, then if a stream or struct contains multiple
+%%         pointers that reference the same value, they will use the same
+%%         referent (and that value will be represented only once in the
+%%         stream). Not all implementations support this.</td>
+%%   </tr>
+%% </table>
+
 -type type_options() :: options() | #{
     location => loc()
     }.
@@ -51,8 +73,11 @@
 -type type_name() :: atom().
 -type record_name() :: atom().
 -type record_field() :: atom().
+
 -type rpce_type() :: basic_type() | struct_type() | bit_type() | 
     custom_type() | endian_type() | size_type() | type_name().
+%% The top-level intermediate representation of an RPCE type.
+
 -type size_type() :: {size_of, record_field(), int_type()} |
     {length_of, record_field(), int_type()}.
 -type endian_type() :: {le, rpce_type()} | {be, rpce_type()}.

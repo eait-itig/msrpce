@@ -29,27 +29,55 @@
 %%      DCE format.
 %%
 %% This parse transform defines serveral new attributes:
-%% <ul>
-%%    <li><code>-rpce(msrpce_compiler:options()).</code> sets the compiler
-%%        options. These affect all other attributes following it until the
-%%        next <code>-rpce()</code> attribute.</li>
-%%    <li><code>-rpce_struct(Name :: record_name()).</code>
-%%        generates <code>encode_Name/1</code> and <code>decode_Name/1</code>
-%%        functions, which encode the given record and all deferred pointer
-%%        values, with no stream headers attached.</li>
-%%    <li><code>-rpce_stream(Name :: atom(), [record_name()]).</code>
-%%        generates <code>encode_Name_v1/1</code>, <code>encode_Name_v2/1</code>
-%%        and <code>decode_Name/1</code> functions, which encode the given list
+%%
+%% <table>
+%%   <tr>
+%%     <td><code>-rpce(msrpce_compiler:options())</code></td>
+%%     <td>Sets compiler options. See {@link msrpce_compiler:options()}. These
+%%         affect all other attributes following
+%%         it until the next <code>-rpce()</code> attribute.</td>
+%%   </tr>
+%%   <tr>
+%%     <td><code>-rpce_struct(Name :: record_name()).</code></td>
+%%     <td>Generates:
+%%        <ul><li><code>encode_Name/1</code></li><li><code>decode_Name/1</code></li></ul>
+%%        These encode the given record and all deferred pointer
+%%        values, with no stream headers attached.</td>
+%%   </tr>
+%%   <tr>
+%%     <td><code>-rpce_stream(Name :: atom(), [record_name()]).</code></td>
+%%     <td>Generates:
+%%        <ul><li><code>encode_Name_v1/1</code></li><li><code>encode_Name_v2/1</code></li>
+%%        <li><code>decode_Name/1</code></li></ul>
+%%        These encode the given list
 %%        of records as a MS-RPCE Type Serialization stream, with one Common
-%%        Type Header, and one Private Header per argument.</li>
-%% </ul>
+%%        Type Header, and one Private Header per argument.</td>
+%%   </tr>
+%% </table>
 %%
 %% The records named in these attributes must be fully type-annotated, with
-%% types taken from the <code>msrpce</code> module (e.g.
-%% <code>msrpce:uint32()</code> or <code>msrpce:pointer(msrpce:string()))</code>).
+%% types taken from the {@link msrpce} module (e.g.
+%% {@link msrpce:uint32()} or {@type msrpce:pointer(msrpce:string())}).
 %%
 %% The header file <code>include/types.hrl</code> also adds local type
 %% definitions and shortcuts which make this more readable.
+%%
+%% <h3>Example</h3>
+%%
+%% <pre>
+%% -include_lib("msrpce/include/types.hrl").
+%%
+%% -record(foobar, {
+%%     field_a :: ulong(),
+%%     field_b :: pointer(str())
+%%     }).
+%%
+%% -rpce_struct(foobar).
+%%
+%% do_something() ->
+%%     Bin = encode_foobar(#foobar{field_a = 123, field_b = "hello"}),
+%%     ...
+%% </pre>
 -module(msrpce_parse_transform).
 
 -export([parse_transform/2, parse_transform_info/0]).

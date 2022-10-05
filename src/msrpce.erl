@@ -34,17 +34,288 @@
 %% -include_lib("msrpce/include/types.hrl").
 %% </pre>
 %%
-%% <style>td, th { padding: 0.2em; border: 1px solid #eee; }</style>
+%% All types have at least their own name aliased by <code>types.hrl</code>,
+%% so e.g. {@link msrpce:uint8()} is aliased as <code>uint8()</code> with
+%% no module qualifier. These implied aliases are not shown in the tables
+%% below.
+%%
 %% <h3>Base integer types (and their aliases)</h3>
-%% <table style="text-align: left; padding: 0.3em;">
+%% <table>
 %%  <tr style="background: #ddd;">
 %%    <th>Type</th><th>Signed</th><th>Width (bits)</th><th>Aliases</th>
 %%  </tr>
 %%  <tr>
 %%    <td>{@link msrpce:uint8()}</td>
-%%    <td>signed</td>
+%%    <td>no</td>
 %%    <td>8</td>
-%%    <td><code>uint8()</code>, <code>uchar()</code>, <code>byt()</code></td>
+%%    <td><code>uchar()</code>, <code>byt()</code>, <code>usmall()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:uint16()}</td>
+%%    <td>no</td>
+%%    <td>16</td>
+%%    <td><code>word()</code>, <code>ushort()</code>, <code>wchar()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:uint32()}</td>
+%%    <td>no</td>
+%%    <td>32</td>
+%%    <td><code>ulong()</code>, <code>dword()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:uint64()}</td>
+%%    <td>no</td>
+%%    <td>64</td>
+%%    <td><code>uhyper()</code>, <code>qword()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:int8()}</td>
+%%    <td>yes</td>
+%%    <td>8</td>
+%%    <td><code>chr()</code>, <code>small()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:int16()}</td>
+%%    <td>yes</td>
+%%    <td>16</td>
+%%    <td><code>word()</code>, <code>short()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:int32()}</td>
+%%    <td>yes</td>
+%%    <td>32</td>
+%%    <td><code>long()</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:int64()}</td>
+%%    <td>yes</td>
+%%    <td>64</td>
+%%    <td><code>hyper()</code></td>
+%%  </tr>
+%% </table>
+%% <h3>String and binary types (and their aliases)</h3>
+%% <table style="text-align: left; padding: 0.3em;">
+%%  <tr style="background: #ddd;">
+%%    <th>Type</th><th>Erlang type</th><th>Conformant</th><th>Varying</th><th>Encoding</th><th>Aliases</th>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:bin()}</td>
+%%    <td>binary</td>
+%%    <td>yes</td>
+%%    <td>yes</td>
+%%    <td>Raw bytes</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:varying_bin()}</td>
+%%    <td>binary</td>
+%%    <td>no</td>
+%%    <td>yes</td>
+%%    <td>Raw bytes</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:fixed_bin()}</td>
+%%    <td>binary</td>
+%%    <td>no</td>
+%%    <td>no</td>
+%%    <td>Raw bytes (fixed length)</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:aligned_bin()}</td>
+%%    <td>binary</td>
+%%    <td>no</td>
+%%    <td>no</td>
+%%    <td>Raw bytes (fixed length and alignment)</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:str()}</td>
+%%    <td>string (list or binary)</td>
+%%    <td>yes</td>
+%%    <td>yes</td>
+%%    <td>UTF-8</td>
+%%    <td><code>lpstr()</code> (pointer)</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:varying_str()}</td>
+%%    <td>string (list or binary)</td>
+%%    <td>no</td>
+%%    <td>yes</td>
+%%    <td>UTF-8</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:unicode()}</td>
+%%    <td>string (list or binary)</td>
+%%    <td>yes</td>
+%%    <td>yes</td>
+%%    <td>UTF16-LE</td>
+%%    <td><code>lpwstr()</code> (pointer)</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:varying_unicode()}</td>
+%%    <td>string (list or binary)</td>
+%%    <td>no</td>
+%%    <td>yes</td>
+%%    <td>UTF16-LE</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:uuid()}</td>
+%%    <td>binary (128-bit)</td>
+%%    <td>no</td>
+%%    <td>no</td>
+%%    <td>Raw bytes (4-byte aligned)</td>
+%%    <td></td>
+%%  </tr>
+%% </table>
+%% <h3>Array types</h3>
+%%
+%% Array types take another MSRPCE type as an argument, and represent an
+%% array of that underlying type. In Erlang, they are used as a list.
+%%
+%% For example, <code>msrpce:array(msrpce:uint16())</code> is a
+%% conformant-varying array of 16-bit unsigned integers. In Erlang it could
+%% be set to e.g. <code>[1,2,3]</code>.
+%%
+%% <table style="text-align: left; padding: 0.3em;">
+%%  <tr style="background: #ddd;">
+%%    <th>Type</th><th>Conformant</th><th>Varying</th><th>Aliases</th>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:array()}</td>
+%%    <td>yes</td>
+%%    <td>yes</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:conformant_array()}</td>
+%%    <td>yes</td>
+%%    <td>no</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:varying_array()}</td>
+%%    <td>no</td>
+%%    <td>yes</td>
+%%    <td></td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:fixed_array()}</td>
+%%    <td>no</td>
+%%    <td>no</td>
+%%    <td></td>
+%%  </tr>
+%% </table>
+%%
+%% <h3>Pointers</h3>
+%%
+%% There is a single pointer type, {@link msrpce:pointer()}, which takes any
+%% RPCE type as an argument. It represents just the reference pointer itself
+%% (no length or size information). It is always nullable (NULL is represented
+%% by the Erlang atom <code>undefined</code>).
+%%
+%% If you have a pointer with size information next to it, the annotation types
+%% {@link msrpce:size_of()} and {@link msrpce:length_of()} can be used to
+%% automatically set it. It will still require a separate field in your record.
+%%
+%% <h3>Annotation types</h3>
+%%
+%% These types wrap another RPCE type and change its behaviour.
+%%
+%% <table style="text-align: left; padding: 0.3em;">
+%%  <tr style="background: #ddd;">
+%%    <th>Type</th><th>Can wrap</th><th>Summary</th>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:be()}</td>
+%%    <td>Any type</td>
+%%    <td>Changes the wrapped type to big-endian representation</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:le()}</td>
+%%    <td>Any type</td>
+%%    <td>Changes the wrapped type to little-endian representation</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:size_of()}</td>
+%%    <td>Integer type (other field can be any pointer, array or string)</td>
+%%    <td>Replaces the value of the wrapped integer with the serialized size of another struct field</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:length_of()}</td>
+%%    <td>Integer type (other field can be any array or string)</td>
+%%    <td>Replaces the value of the wrapped integer with the array length of another struct field</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:bitset()}</td>
+%%    <td>Integer type</td>
+%%    <td>Represents an integer unpacked to a Map of bit fields</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:bitset_mask()}</td>
+%%    <td>Integer type</td>
+%%    <td>Like <code>bitset()</code> but uses masks, not bit numbers</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:custom()}</td>
+%%    <td>Any type</td>
+%%    <td>Passes the wrapped type through a custom decode/encode function</td>
+%%  </tr>
+%% </table>
+%%
+%% <h3>Other built-in compound types</h3>
+%%
+%% These types are defined in <code>types.hrl</code> and may only be used
+%% by their bare names, after including that header.
+%%
+%% <table style="text-align: left; padding: 0.3em;">
+%%  <tr style="background: #ddd;">
+%%    <th>Type</th><th>Serialization</th><th>Erlang representation</th><th>Summary</th>
+%%  </tr>
+%%  <tr>
+%%    <td><code>sid()</code></td>
+%%    <td>SID</td>
+%%    <td>{@link msrpce:sid()}</td>
+%%    <td>A MS Security Identifier (SID), e.g. <code>[1,5,...]</code></td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>rpc_unicode_str()</code></td>
+%%    <td>struct</td>
+%%    <td><code>string()</code></td>
+%%    <td>A <code>RPC_UNICODE_STRING</code> structure</td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>filetime()</code></td>
+%%    <td><code>uint32</code></td>
+%%    <td>{@link msrpce:filetime()}</td>
+%%    <td>File modification timestamp (also used for other timestamps)</td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>ntstatus()</code></td>
+%%    <td><code>uint32</code></td>
+%%    <td>{@link msrpce:ntstatus()}</td>
+%%    <td>Generic status code format used by many parts of Windows</td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>multi_string()</code></td>
+%%    <td><code>pointer(array(uint8()))</code></td>
+%%    <td><code>[string()]</code></td>
+%%    <td>Multiple zero-terminated UTF8 strings, with a double-zero-terminator at the end (<code>msz</code>)</td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>multi_unicode()</code></td>
+%%    <td><code>pointer(array(uint16()))</code></td>
+%%    <td><code>[string()]</code></td>
+%%    <td>Multiple zero-terminated UTF16 strings, with a double-zero-terminator (4 bytes) at the end</td>
+%%  </tr>
+%%  <tr>
+%%    <td><code>rpc_multi_sz()</code></td>
+%%    <td>struct</td>
+%%    <td><code>[string()]</code></td>
+%%    <td>A <code>RPC_MULTI_SZ</code> structure, containing a multi-string</td>
 %%  </tr>
 %% </table>
 %%
@@ -108,7 +379,8 @@
 %% A signed 64-bit integer
 
 -type fixed_array(_N, T) :: [T].
-%% A fixed-size array with no length integer included.
+%% A fixed-size array with no length integer included. The first argument
+%% (<code>N</code>) should be the length as an integer.
 
 -type conformant_array(T) :: [T].
 %% A conformant array (has "maximum" length, offset and real length, then the
@@ -121,35 +393,124 @@
 %% A conformant-varying array (the most commonly used kind)
 
 -type pointer(T) :: undefined | T.
-%% A pointer to another RPCE structure. A 32-bit pointer value is included in
+%% A pointer to any RPCE type. A 32-bit pointer value is included in
 %% the stream and then the actual content of it is serialised at the end.
+%%
+%% Pointer values are generated as either <code>16#00000000</code> (the
+%% <code>NULL</code> value for <code>undefined</code>) or
+%% <code>16#00020000 bor (Index bsl 2)</code>
+%% to match the behaviour of the MS IDL compiler in most common cases.
 
 -type custom(_Base, RealType, _Encoder, _Decoder) :: RealType.
-%% Defines a custom extension to a base RPC type. The "Base" argument should be
-%% the base RPCE type (e.g. <code>msrpce:uint16()</code>). Encoder and Decoder
-%% specify the names of functions in the current module to use for encoding
-%% and decoding. They should be of arity /1. Encoder takes the decoded base
-%% type and outputs RealType. Decoder does the inverse.
+%% Defines a custom extension to a base RPC type.
+%%
+%% <table>
+%%   <tr>
+%%     <td><code>Base</code></td>
+%%     <td>The base RPCE type (e.g. {@link msrpce:uint16()})</td>
+%%   </tr>
+%%   <tr>
+%%      <td><code>RealType</code></td>
+%%      <td>Actual Erlang type of the final decoded value.</td>
+%%   </tr>
+%%   <tr>
+%%      <td><code>Encoder</code></td>
+%%      <td>Atom name of an arity-1 function which encodes the value (takes
+%%          a value of type <code>RealType</code> and converts to type
+%%          <code>Base</code>).</td>
+%%   </tr>
+%%   <tr>
+%%      <td><code>Decoder</code></td>
+%%      <td>Atom name of an arity-1 function which decodes the value (takes
+%%          a value of type <code>Base</code> and converts to type
+%%          <code>RealType</code>).</td>
+%%   </tr>
+%% </table>
+%%
+%% <h4>Example</h4>
+%% <pre>
+%% -type thing() :: msrpce:custom(uint8(), {integer(), integer()},
+%%     encode_thing, decode_thing).
+%%
+%% encode_thing({A, B}) -> A + B * 10.
+%% decode_thing(Sum) -> {Sum rem 10, Sum div 10}.
+%%
+%% -record(foobar, { field :: thing() }).
+%% -msrpce_struct(foobar).
+%%
+%% #foobar{field = {1,3}}       % => encoded as a uint8 of value 13
+%% </pre>
 
 -type builtin(_Base, RealType, _Encoder, _Decoder) :: RealType.
 %% An extension type defined in the <code>msrpce</code> module.
 
 -type bitset(_Base, BitName, _BitMap) :: #{BitName => boolean()}.
 %% An integer which is made up of bits, each representing a boolean flag.
-%% The Base type should be one of the unsigned integer types
-%% (<code>msrpce:uint*</code>). BitName is a union of all possible bit
-%% names. BitMap is a map of the form
-%% <code>#{BitName => BitNumber :: integer()}</code>, where
-%% <code>BitNumber</code> is 0 for LSB.
+%%
+%% <table>
+%%   <tr>
+%%     <td><code>Base</code></td>
+%%     <td>Any unsigned integer type (e.g. {@link msrpce:uint32()})</td>
+%%     <td>The actual serialised format of this field</td>
+%%   </tr>
+%%   <tr>
+%%     <td><code>BitName</code></td>
+%%     <td>Union of atom types (e.g. <code>bit_a | bit_b</code>)</td>
+%%     <td>All the possible bit names used in this set</td>
+%%   </tr>
+%%   <tr>
+%%     <td><code>BitMap</code></td>
+%%     <td>{@link msrpce:bitset_bitmap()} (e.g. <code>#{bit_a => 5, bit_b => 0}</code>)</td>
+%%     <td>Map of bit name => bit number</td>
+%%   </tr>
+%% </table>
+%%
+%% <h4>Example</h4>
+%% <pre>
+%% -type field() :: msrpce:bitset(
+%%     msrpce:uint32(),
+%%     bit_a | bit_b,
+%%     #{bit_a => 0, bit_b => 5}).
+%%
+%% -record(thing, {
+%%     bar :: field()
+%%     }).
+%% -msrpce_struct(thing).
+%%
+%% #thing{bar = #{bit_a => true}}   % => encoded as 0x00000001
+%% #thing{bar = #{bit_b => true}}   % => encoded as 0x00000020
+%% </pre>
 
 -type bitset_mask(_Base, BitName, _MaskMap) :: #{BitName => boolean()}.
 %% Like a <code>bitset()</code> but the map takes masks rather than bit numbers.
+%%
+%% <h4>Example</h4>
+%% <pre>
+%% -type field() :: msrpce:bitset_mask(
+%%     msrpce:uint32(),
+%%     bit_a | bit_b,
+%%     #{bit_a => 16#00100000, bit_b => 16#00000020}).
+%%
+%% -record(thing, {
+%%     bar :: field()
+%%     }).
+%% -msrpce_struct(thing).
+%%
+%% #thing{bar = #{bit_a => true, bit_b => true}}   % => encoded as 0x00100020
+%% </pre>
 
 -type bitnum() :: integer().
+%% Bit number, starting at 0 for LSB.
+
 -type mask() :: integer().
+%% Bit mask, represented as an integer that will be bitwise-OR'd into the
+%% value if this bit is set.
+
 -type bitset_bitmap() :: #{atom() => bitnum()}.
-%% The type of the <code>MaskMap</code> argument to {@link bitset_mask()}.
+%% The type of the <code>BitMap</code> argument to {@link bitset()}.
+
 -type bitset_maskmap() :: #{atom() => mask()}.
+%% The type of the <code>MaskMap</code> argument to {@link bitset_mask()}.
 
 -type le(T) :: T.
 %% Forces the inner type to be little-endian always (ignores the stream
@@ -302,7 +663,8 @@ uuid_from_string(Str0) ->
 -type ntstatus() :: {ntstatus:severity(), ntstatus:code() | integer()}.
 %% windows NT status return value
 
-%% @private
+%% @doc Converts an NTSTATUS value from integer to atom/tuple form.
+-spec decode_ntstatus(uint32()) -> ntstatus().
 decode_ntstatus(Int) ->
     Sev = case (Int bsr 30) band 3 of
         0 -> success;
@@ -313,7 +675,8 @@ decode_ntstatus(Int) ->
     Code = ntstatus:int_to_code(Int),
     {Sev, Code}.
 
-%% @private
+%% @doc Converts an NTSTATUS value from atom/tuple form to an integer.
+-spec encode_ntstatus(ntstatus()) -> uint32().
 encode_ntstatus({Sev, Code}) ->
     Int0 = if
         is_atom(Code) -> ntstatus:code_to_int(Code);
