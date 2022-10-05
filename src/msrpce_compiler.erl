@@ -50,8 +50,11 @@
 
 -type type_name() :: atom().
 -type record_name() :: atom().
+-type record_field() :: atom().
 -type rpce_type() :: basic_type() | struct_type() | bit_type() | 
-    custom_type() | endian_type() | type_name().
+    custom_type() | endian_type() | size_type() | type_name().
+-type size_type() :: {size_of, record_field(), int_type()} |
+    {length_of, record_field(), int_type()}.
 -type endian_type() :: {le, rpce_type()} | {be, rpce_type()}.
 -type custom_type() :: {custom, rpce_type(), expr(), expr()} |
     {builtin, rpce_type(), expr(), expr()}.
@@ -71,7 +74,7 @@
 -type int_type() :: boolean | uint8 | uint16 | uint32 | uint64 | int8 | int16 |
     int32 | int64.
 
--type field_spec() :: {Field :: atom(), rpce_type()}.
+-type field_spec() :: {record_field(), rpce_type()}.
 
 -type form() :: erl_syntax:syntaxTree().
 -type expr() :: erl_syntax:syntaxTree().
@@ -214,6 +217,10 @@ get_deferred_types({le, Base}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
 get_deferred_types({be, Base}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
+get_deferred_types({size_of, _Field, Base}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
+get_deferred_types({length_of, _Field, Base}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
 get_deferred_types({bitset, Base, _Bits}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
 get_deferred_types({pointer, Type = {struct, RecName, Fields}}, Path0, _Name) ->
@@ -263,6 +270,16 @@ resolve_typerefs(T = {fixed_string, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _, _}, _) -> {ok, T};
 resolve_typerefs(unicode, _) -> {ok, unicode};
+resolve_typerefs({length_of, Field, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {length_of, Field, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({size_of, Field, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {size_of, Field, SubType1}};
+        Err -> Err
+    end;
 resolve_typerefs({bitset, SubType0, Map}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
         {ok, SubType1} -> {ok, {bitset, SubType1, Map}};
@@ -515,6 +532,8 @@ type_align(varying_string) -> type_align(uint32);
 type_align({fixed_string, _}) -> 1;
 type_align({fixed_binary, _}) -> 1;
 type_align({fixed_binary, _, A}) -> A;
+type_align({length_of, _, T}) -> type_align(T);
+type_align({size_of, _, T}) -> type_align(T);
 type_align({le, T}) -> type_align(T);
 type_align({be, T}) -> type_align(T);
 type_align(unicode) -> type_align(uint32);
@@ -702,6 +721,40 @@ encode_data({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => big},
     S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
+
+encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0, unpacks = U} = S0,
+    [{field, _ThisField} | Ctx1] = Ctx0,
+    #{Ctx1 := FieldMap} = U,
+    #{Field := {_Type, RealVar}} = FieldMap,
+    {TVar, S1} = inc_tvar(S0),
+    F = erl_syntax:match_expr(TVar,
+        erl_syntax:application(erl_syntax:atom(length), [RealVar])),
+    S2 = add_forms([F], S1),
+    encode_data(Base, TVar, S2);
+encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0, unpacks = U} = S0,
+    [{field, _ThisField} | Ctx1] = Ctx0,
+    #{Ctx1 := FieldMap} = U,
+    #{Field := {RealType, RealVar}} = FieldMap,
+    Fun = case RealType of
+        {pointer, RefType} ->
+            case RefType of
+                {struct, RefStruct, _} ->
+                    enc_fun(build_struct_path(push_struct(RefStruct, S0)));
+                _Other ->
+                    enc_fun(build_struct_path(S0) ++ ['_F', Field])
+            end;
+        _ ->
+            error({not_implemented, {size_of, RealType}})
+    end,
+    {TVar, S1} = inc_tvar(S0),
+    F = erl_syntax:match_expr(TVar,
+        erl_syntax:application(
+            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(size_of),
+            [Fun, RealVar])),
+    S2 = add_forms([F], S1),
+    encode_data(Base, TVar, S2);
 
 encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
                                                        (T =:= binary) ->
@@ -921,7 +974,7 @@ encode_data(Type = {struct, Record, Fields}, _SrcVar, S0 = #fstate{}) ->
     #{Ctx := FieldMap} = U,
     S2 = add_encode_step(Align, [], 0, S1),
     S3 = lists:foldl(fun ({FName, FType}, SS0) ->
-        #{FName := FVar} = FieldMap,
+        #{FName := {_, FVar}} = FieldMap,
         SS1 = push_field(FName, SS0),
         SS2 = encode_data(FType, FVar, SS1),
         pop_field(SS2)
@@ -939,6 +992,10 @@ encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
         erl_syntax:application(Enc, [SrcVar])),
     S3 = add_forms([Form], S2),
     encode_unpacks(Base, TVar, S3);
+encode_unpacks({size_of, _Field, _Base}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({length_of, _Field, _Base}, _SrcVar, S0 = #fstate{}) ->
+    S0;
 encode_unpacks({le, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => little},
     S1 = encode_unpacks(Base, SrcVar, S0#fstate{opts = Opts1}),
@@ -947,7 +1004,7 @@ encode_unpacks({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => big},
     S1 = encode_unpacks(Base, SrcVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
-encode_unpacks({bitset, Base, _Map}, SrcVar, S0 = #fstate{}) when is_atom(Base) ->
+encode_unpacks({bitset, Base, _Map}, _SrcVar, S0 = #fstate{}) when is_atom(Base) ->
     S0;
 encode_unpacks({conformant_array, _Type}, SrcVar, S0 = #fstate{}) ->
     MaxLenExpr = erl_syntax:application(erl_syntax:atom(length),
@@ -971,12 +1028,12 @@ encode_unpacks({fixed_string, _N}, _SrcVar, S0 = #fstate{}) ->
     S0;
 encode_unpacks({struct, Record, Fields}, SrcVar, S0 = #fstate{}) ->
     S1 = push_struct(Record, S0),
-    {FieldMap, S2} = lists:foldl(fun ({FName, _FType}, {M0, SS0}) ->
+    {FieldMap, S2} = lists:foldl(fun ({FName, FType}, {M0, SS0}) ->
         {FVar, SS1} = inc_tvar(SS0),
-        M1 = M0#{FName => FVar},
+        M1 = M0#{FName => {FType, FVar}},
         {M1, SS1}
     end, {#{}, S1}, Fields),
-    FieldExprs = maps:fold(fun (FName, FVar, Acc) ->
+    FieldExprs = maps:fold(fun (FName, {_, FVar}, Acc) ->
         [erl_syntax:record_field(
             erl_syntax:atom(FName),
             FVar) | Acc]
@@ -989,7 +1046,7 @@ encode_unpacks({struct, Record, Fields}, SrcVar, S0 = #fstate{}) ->
     U1 = U0#{Ctx => FieldMap},
     S4 = S3#fstate{unpacks = U1},
     S5 = lists:foldl(fun ({FName, FType}, SS0) ->
-        #{FName := FVar} = FieldMap,
+        #{FName := {_, FVar}} = FieldMap,
         SS1 = push_field(FName, SS0),
         SS2 = encode_unpacks(FType, FVar, SS1),
         pop_field(SS2)
@@ -1087,6 +1144,11 @@ decode_data({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => big},
     S1 = decode_data(Base, DstVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
+
+decode_data({length_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_data(Base, DstVar, S0);
+decode_data({size_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_data(Base, DstVar, S0);
 
 decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
                                                        (T =:= binary) ->
@@ -1413,7 +1475,11 @@ decode_hoists({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => big},
     S1 = decode_hoists(Base, DstVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
-decode_hoists({bitset, _Base, _Map}, DstVar, S0 = #fstate{}) ->
+decode_hoists({size_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_hoists(Base, DstVar, S0);
+decode_hoists({length_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_hoists(Base, DstVar, S0);
+decode_hoists({bitset, _Base, _Map}, _DstVar, S0 = #fstate{}) ->
     S0;
 decode_hoists(PrimType, _DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
     S0;
@@ -1475,6 +1541,11 @@ decode_finish({custom, Base, _E, Dec}, SrcVar, DstVar, S0 = #fstate{}) ->
 decode_finish({le, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
     decode_finish(Base, SrcVar, DstVar, S0);
 decode_finish({be, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
+    decode_finish(Base, SrcVar, DstVar, S0);
+
+decode_finish({size_of, _Field, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
+    decode_finish(Base, SrcVar, DstVar, S0);
+decode_finish({length_of, _Field, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
     decode_finish(Base, SrcVar, DstVar, S0);
 
 decode_finish({ArrType, _MembType}, SrcVar, DstVar, S0 = #fstate{})
@@ -1655,7 +1726,7 @@ decode_func_form({struct, RecName, _}, Loc, Opts) ->
     F1 = erl_syntax:revert(F0),
     set_anno(Loc, erl_syntax:atom_value(finish_fun_name([RecName])), F1).
 
-decode_stream_func_form(Name, Loc, Opts) ->
+decode_stream_func_form(Name, Loc, _Opts) ->
     InVar = erl_syntax:variable('Input'),
     FuncName = concat_atoms([decode, Name]),
     V1Fun = concat_atoms([decode, Name, v1]),

@@ -49,6 +49,7 @@
 
 -record(test2, {
     a :: msrpce:uint32(),
+    szb :: size_of(b, uint32()),
     b :: pointer(what()),
     c :: msrpce:int32()
     }).
@@ -65,7 +66,8 @@
 
 -record(test5, {
     b :: uint16(),
-    as :: array(uint16())
+    as :: array(uint16()),
+    acnt :: length_of(as, uint8())
     }).
 
 -record(test6, {
@@ -242,10 +244,13 @@ test2_test() ->
                     b = #test1{a = 1, b = 2, c = 3, d = 4},
                     c = -123},
     Data = encode_test2(Struct),
-    ?assertMatch(<<61:32/big, 16#00020000:32/little, (-123):32/big-signed,
-        0:32, 1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, Data),
+    ?assertMatch(<<61:32/big, 24:32/big, 16#00020000:32/little,
+        (-123):32/big-signed,
+        1, 0:24, 2:32/big, 3, 0:24, 0:32, 4:64/big>>, Data),
     DeStruct = decode_test2(Data),
-    ?assertMatch(Struct, DeStruct).
+    ?assertMatch(#test2{a = 61,
+                    b = #test1{a = 1, b = 2, c = 3, d = 4},
+                    c = -123}, DeStruct).
 
 test3_test() ->
     Struct = #test3{a = 30, b = "hello world"},
@@ -272,13 +277,13 @@ test5_test() ->
     Struct = #test5{as = [1,2,3], b = 1000},
     Data = encode_test5(Struct),
     ?assertMatch(<<3:32/big,1000:16/big,0:16,0:32,3:32/big,
-        1:16/big,2:16/big,3:16/big>>, Data),
+        1:16/big,2:16/big,3:16/big, 3>>, Data),
     DeStruct = decode_test5(Data),
-    ?assertMatch(Struct, DeStruct).
+    ?assertMatch(#test5{as = [1,2,3], b = 1000}, DeStruct).
 
 test5_offset_test() ->
     Data = <<5:32/big,1000:16/big,0:16,1:32,3:32/big,
-        10:16/big,1:16/big,2:16/big,3:16/big,50:16/big>>,
+        10:16/big,1:16/big,2:16/big,3:16/big,50:16/big, 3>>,
     DeStruct = decode_test5(Data),
     ?assertMatch(#test5{as = [1,2,3], b = 1000}, DeStruct).
 

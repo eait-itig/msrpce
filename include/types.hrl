@@ -57,6 +57,8 @@
 -type pointer(T) :: msrpce:pointer(T).
 -type fixed_bin(N) :: msrpce:fixed_bin(N).
 -type aligned_bin(N, A) :: msrpce:aligned_bin(N, A).
+-type size_of(F, T) :: msrpce:size_of(F, T).
+-type length_of(F, T) :: msrpce:length_of(F, T).
 
 -type bin() :: msrpce:bin().
 -type varying_bin() :: msrpce:varying_bin().

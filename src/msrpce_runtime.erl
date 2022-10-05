@@ -31,6 +31,7 @@
 -export([
     read_ptr/4,
     write_ptr/5,
+    size_of/2,
     get_ptr_val/3,
     finish/1,
     align/2,
@@ -115,6 +116,13 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
         _ ->
             error({end_before_ptr, TypeName, O0})
     end.
+
+-spec size_of(encoder(), term()) -> bytes().
+size_of(Func, V) ->
+    S0 = #msrpce_state{mode = encode, aliasing = false, data = <<>>},
+    S1 = Func(V, S0),
+    #msrpce_state{data = D} = S1,
+    byte_size(D).
 
 -spec write_ptr(typename(), bytes(), encoder(), term(), state()) -> state().
 write_ptr(_TypeName, _Align, _Func, undefined, S0 = #msrpce_state{data = D0,

@@ -120,6 +120,12 @@ type_to_msrpce_type(Form) ->
                         erl_syntax:user_type_application_arguments(Form),
                     {fixed_array, erl_syntax:integer_value(N),
                         type_to_msrpce_type(RefType)};
+                ReferenceType when (ReferenceType =:= size_of) or
+                                   (ReferenceType =:= length_of) ->
+                    [Field, RefType] =
+                        erl_syntax:user_type_application_arguments(Form),
+                    {ReferenceType, erl_syntax:atom_value(Field),
+                        type_to_msrpce_type(RefType)};
                 ReferenceType when (ReferenceType =:= conformant_array) or
                                    (ReferenceType =:= varying_array) or
                                    (ReferenceType =:= array) or
@@ -153,6 +159,13 @@ type_to_msrpce_type(Form) ->
                             [N, RefType] =
                                 erl_syntax:type_application_arguments(Form),
                             {fixed_array, erl_syntax:integer_value(N),
+                                type_to_msrpce_type(RefType)};
+
+                        {msrpce, RType} when (RType =:= length_of) or
+                                             (RType =:= size_of) ->
+                            [Field, RefType] =
+                                erl_syntax:type_application_arguments(Form),
+                            {RType, erl_syntax:atom_value(Field),
                                 type_to_msrpce_type(RefType)};
 
                         {msrpce, RType} when (RType =:= conformant_array) or

@@ -43,7 +43,8 @@
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
     int8/0, int16/0, int32/0, int64/0,
-    bitset/3, bitslice/3, bitset_mask/3
+    bitset/3, bitslice/3, bitset_mask/3,
+    size_of/2, length_of/2
     ]).
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
@@ -122,6 +123,14 @@
 -type be(T) :: T.
 %% Forces the inner type to be big-endian always (ignores the stream
 %% endian option).
+
+-type size_of(_Field, IntType) :: IntType.
+%% An integer type which represents the encoded byte size of a sibling field
+%% in the same struct. It will be automatically calculated during encoding.
+
+-type length_of(_Field, IntType) :: IntType.
+%% An integer type which represents the array length of a sibling field in
+%% the same struct. It will be automatically calculated during encoding.
 
 -type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 
