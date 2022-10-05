@@ -24,6 +24,8 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
+%% @private
+%% @doc Runtime support module for the generated output of {@link msrpce_compiler}
 -module(msrpce_runtime).
 
 -include("records.hrl").

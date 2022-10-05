@@ -24,6 +24,7 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
+%% @private
 -module(msrpce_compile_test).
 
 -compile({parse_transform, msrpce_parse_transform}).

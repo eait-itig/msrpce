@@ -24,6 +24,30 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
+%% @doc Contains type definitions for RPCE data types.
+%%
+%% Most of these data types have shorter aliases, which are available by
+%% including <code>types.hrl</code> and <code>records.hrl</code>:
+%%
+%% <pre>
+%% -include_lib("msrpce/include/records.hrl").
+%% -include_lib("msrpce/include/types.hrl").
+%% </pre>
+%%
+%% <style>td, th { padding: 0.2em; border: 1px solid #eee; }</style>
+%% <h3>Base integer types (and their aliases)</h3>
+%% <table style="text-align: left; padding: 0.3em;">
+%%  <tr style="background: #ddd;">
+%%    <th>Type</th><th>Signed</th><th>Width (bits)</th><th>Aliases</th>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:uint8()}</td>
+%%    <td>signed</td>
+%%    <td>8</td>
+%%    <td><code>uint8()</code>, <code>uchar()</code>, <code>byt()</code></td>
+%%  </tr>
+%% </table>
+%%
 -module(msrpce).
 
 -export([
@@ -43,7 +67,8 @@
 -export_type([
     uint8/0, uint16/0, uint32/0, uint64/0,
     int8/0, int16/0, int32/0, int64/0,
-    bitset/3, bitslice/3, bitset_mask/3,
+    bitset/3, bitset_mask/3,
+    bitset_bitmap/0, bitset_maskmap/0,
     size_of/2, length_of/2
     ]).
 -export_type([
@@ -65,14 +90,22 @@
 %% A UUID in binary form
 
 -type uint8() :: integer().
+%% An unsigned 8-bit integer
 -type uint16() :: integer().
+%% An unsigned 16-bit integer
 -type uint32() :: integer().
+%% An unsigned 32-bit integer (also known as a <code>ulong</code> or <code>dword</code>)
 -type uint64() :: integer().
+%% An unsigned 64-bit integer
 
 -type int8() :: integer().
+%% A signed 8-bit integer
 -type int16() :: integer().
+%% A signed 16-bit integer
 -type int32() :: integer().
+%% A signed 32-bit integer
 -type int64() :: integer().
+%% A signed 64-bit integer
 
 -type fixed_array(_N, T) :: [T].
 %% A fixed-size array with no length integer included.
@@ -115,6 +148,7 @@
 -type bitnum() :: integer().
 -type mask() :: integer().
 -type bitset_bitmap() :: #{atom() => bitnum()}.
+%% The type of the <code>MaskMap</code> argument to {@link bitset_mask()}.
 -type bitset_maskmap() :: #{atom() => mask()}.
 
 -type le(T) :: T.
@@ -131,8 +165,6 @@
 -type length_of(_Field, IntType) :: IntType.
 %% An integer type which represents the array length of a sibling field in
 %% the same struct. It will be automatically calculated during encoding.
-
--type bitslice(_Base, PartName, _PartMap) :: #{PartName => integer()}.
 
 -type bin() :: binary().
 %% A conformant-varying binary string, with no terminator. Conformant string
@@ -161,6 +193,7 @@
 -type varying_unicode() :: string().
 %% A varying UTF16-LE string.
 
+%% @private
 -spec encode_sid(sid()) -> #msrpce_sid{}.
 encode_sid([Rev, IdAuth | SubAuths]) ->
     #msrpce_sid{revision = Rev,
@@ -168,6 +201,7 @@ encode_sid([Rev, IdAuth | SubAuths]) ->
                 identifier_auth = <<IdAuth:48/big>>,
                 sub_auths = SubAuths}.
 
+%% @private
 -spec decode_sid(#msrpce_sid{}) -> sid().
 decode_sid(#msrpce_sid{revision = Rev,
                        sub_auth_count = SubAuthCount,
@@ -175,6 +209,7 @@ decode_sid(#msrpce_sid{revision = Rev,
                        sub_auths = SubAuths}) when (length(SubAuths) == SubAuthCount) ->
     [Rev, IdAuth | SubAuths].
 
+%% @private
 -spec encode_filetime(filetime()) -> aligned_bin(16,4).
 encode_filetime(null) ->
     <<0:64>>;
@@ -190,6 +225,7 @@ encode_filetime({N, millisecond}) ->
 encode_filetime({N, second}) ->
     encode_filetime({N * 1000, millisecond}).
 
+%% @private
 -spec decode_filetime(aligned_bin(16,4)) -> filetime().
 decode_filetime(<<0:64>>) -> null;
 decode_filetime(<<16#7fffffffffffffff:64/little>>) -> never;
@@ -215,6 +251,7 @@ decode_filetime(<<V:64/little>>) ->
             {DUSec, decimicrosecond}
     end.
 
+%% @private
 -spec encode_rpc_unicode(string()) -> #msrpce_unicode_string{}.
 encode_rpc_unicode(String) ->
     Len = string:len(String),
@@ -222,6 +259,7 @@ encode_rpc_unicode(String) ->
                            maxlen = Len * 2,
                            str = String}.
 
+%% @private
 -spec decode_rpc_unicode(#msrpce_unicode_string{}) -> string().
 decode_rpc_unicode(#msrpce_unicode_string{len = 0, maxlen = 0, str = _}) ->
     "";
@@ -236,6 +274,7 @@ decode_rpc_unicode(R = #msrpce_unicode_string{len = L, maxlen = MaxL, str = S0})
 -type string_uuid() :: string().
 %% A UUID in string hex form (e.g. "5e8cb9bc-bbc2-38b2-afc9-a9218c3b1d9c")
 
+%% @doc Converts a UUID to the standard hex string format.
 -spec uuid_to_string(uuid()) -> string_uuid().
 uuid_to_string(<<TimeLow:32/big, TimeMid:16/big,
                  TimeHiVer:16/big, ClockSeq:16/big,
@@ -244,6 +283,7 @@ uuid_to_string(<<TimeLow:32/big, TimeMid:16/big,
         "~8.16.0B-~4.16.0B-~4.16.0B-~4.16.0B-~12.16.0B",
         [TimeLow, TimeMid, TimeHiVer, ClockSeq, Node])).
 
+%% @doc Parses a hex-string-format UUID and returns a binary.
 -spec uuid_from_string(string_uuid()) -> uuid().
 uuid_from_string(Str0) ->
     Hex = lists:seq($0, $9) ++ lists:seq($a, $f),
@@ -262,6 +302,7 @@ uuid_from_string(Str0) ->
 -type ntstatus() :: {ntstatus:severity(), ntstatus:code() | integer()}.
 %% windows NT status return value
 
+%% @private
 decode_ntstatus(Int) ->
     Sev = case (Int bsr 30) band 3 of
         0 -> success;
@@ -272,6 +313,7 @@ decode_ntstatus(Int) ->
     Code = ntstatus:int_to_code(Int),
     {Sev, Code}.
 
+%% @private
 encode_ntstatus({Sev, Code}) ->
     Int0 = if
         is_atom(Code) -> ntstatus:code_to_int(Code);
@@ -285,16 +327,20 @@ encode_ntstatus({Sev, Code}) ->
     end,
     Int0 bor SevMask.
 
+%% @private
 decode_rpc_multi_sz(#msrpce_multi_sz{value = Arr, nchar = N}) ->
     N = length(Arr),
     string:lexemes(Arr, [0]).
 
+%% @private
 encode_rpc_multi_sz(Strings) ->
     Arr = lists:flatten(lists:join(0, Strings) ++ [0,0]),
     #msrpce_multi_sz{value = Arr, nchar = length(Arr)}.
 
+%% @private
 decode_multi_sz(Arr) ->
     string:lexemes(Arr, [0]).
 
+%% @private
 encode_multi_sz(Strings) ->
     lists:flatten(lists:join(0, Strings) ++ [0,0]).

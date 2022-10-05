@@ -1,5 +1,6 @@
-% Generated from MS-DTYP
+% Auto-generated from MS-DTYP
 
+%% @private
 -module(ntstatus).
 -export([int_to_code/1, code_to_int/1]).
 -export_type([code/0, severity/0]).

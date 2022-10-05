@@ -36,7 +36,7 @@
     func_forms/1
     ]).
 -export_type([
-    state/0, options/0, type_options/0, rpce_type/0
+    state/0, options/0, type_options/0, rpce_type/0, type_name/0
     ]).
 
 -type loc() :: erl_syntax:annotation_or_location().

@@ -24,6 +24,32 @@
 %% THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 %%
 
+%% @doc A parse transform which provides attributes for compiling record
+%%      and type definitions into encode/decode functions for the MS RPC
+%%      DCE format.
+%%
+%% This parse transform defines serveral new attributes:
+%% <ul>
+%%    <li><code>-rpce(msrpce_compiler:options()).</code> sets the compiler
+%%        options. These affect all other attributes following it until the
+%%        next <code>-rpce()</code> attribute.</li>
+%%    <li><code>-rpce_struct(Name :: record_name()).</code>
+%%        generates <code>encode_Name/1</code> and <code>decode_Name/1</code>
+%%        functions, which encode the given record and all deferred pointer
+%%        values, with no stream headers attached.</li>
+%%    <li><code>-rpce_stream(Name :: atom(), [record_name()]).</code>
+%%        generates <code>encode_Name_v1/1</code>, <code>encode_Name_v2/1</code>
+%%        and <code>decode_Name/1</code> functions, which encode the given list
+%%        of records as a MS-RPCE Type Serialization stream, with one Common
+%%        Type Header, and one Private Header per argument.</li>
+%% </ul>
+%%
+%% The records named in these attributes must be fully type-annotated, with
+%% types taken from the <code>msrpce</code> module (e.g.
+%% <code>msrpce:uint32()</code> or <code>msrpce:pointer(msrpce:string()))</code>).
+%%
+%% The header file <code>include/types.hrl</code> also adds local type
+%% definitions and shortcuts which make this more readable.
 -module(msrpce_parse_transform).
 
 -export([parse_transform/2, parse_transform_info/0]).
