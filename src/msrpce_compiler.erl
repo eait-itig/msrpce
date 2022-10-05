@@ -737,22 +737,22 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
     [{field, _ThisField} | Ctx1] = Ctx0,
     #{Ctx1 := FieldMap} = U,
     #{Field := {RealType, RealVar}} = FieldMap,
-    Fun = case RealType of
-        {pointer, RefType0} ->
-            RefType1 = case RefType0 of
-                {custom, Base, _Enc, _Dec} -> Base;
-                {le, Base} -> Base;
-                {be, Base} -> Base;
-                Other -> Other
-            end,
-            case RefType1 of
-                {struct, RefStruct, _} ->
-                    enc_fun(build_struct_path(push_struct(RefStruct, S0)));
-                _Other ->
-                    enc_fun(build_struct_path(S0) ++ ['_F', Field])
-            end;
-        _ ->
-            error({not_implemented, {size_of, RealType}})
+    RefType0 = case RealType of
+        {custom, {pointer, T}, _E, _D} -> T;
+        {pointer, T} -> T;
+        _ -> error({not_implemented, {size_of, RealType}})
+    end,
+    RefType1 = case RefType0 of
+        {custom, Base, _Enc, _Dec} -> Base;
+        {le, Base} -> Base;
+        {be, Base} -> Base;
+        Other -> Other
+    end,
+    Fun = case RefType1 of
+        {struct, RefStruct, _} ->
+            enc_fun(build_struct_path(push_struct(RefStruct, S0)));
+        _Other ->
+            enc_fun(build_struct_path(S0) ++ ['_F', Field])
     end,
     {TVar, S1} = inc_tvar(S0),
     F = erl_syntax:match_expr(TVar,
