@@ -733,7 +733,11 @@ encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
     end,
     {TVar, S1} = inc_tvar(S0),
     F = erl_syntax:match_expr(TVar,
-        erl_syntax:application(erl_syntax:atom(length), [RealVar1])),
+        erl_syntax:case_expr(RealVar1,
+            [erl_syntax:clause([erl_syntax:atom(undefined)], [],
+                [erl_syntax:integer(0)]),
+             erl_syntax:clause([erl_syntax:underscore()], [],
+                [erl_syntax:application(erl_syntax:atom(length), [RealVar1])])])),
     S2 = add_forms([F], S1),
     encode_data(Base, TVar, S2);
 encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
@@ -778,8 +782,12 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
         [Fun, RealVar1]),
     Expr1 = case Subtract of
         0 -> Expr0;
-        _ -> erl_syntax:infix_expr(Expr0, erl_syntax:operator('-'),
-            erl_syntax:integer(Subtract))
+        _ ->
+            erl_syntax:application(erl_syntax:atom(lists),
+                erl_syntax:atom(max), [erl_syntax:list([
+                    erl_syntax:integer(0),
+                    erl_syntax:infix_expr(Expr0, erl_syntax:operator('-'),
+                        erl_syntax:integer(Subtract))])])
     end,
     F = erl_syntax:match_expr(TVar, Expr1),
     S2 = add_forms([F], S1),

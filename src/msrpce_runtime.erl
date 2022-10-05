@@ -118,6 +118,8 @@ read_ptr(TypeName, Align, Func, S0 = #msrpce_state{data = D0,
     end.
 
 -spec size_of(encoder(), term()) -> bytes().
+size_of(_Func, undefined) ->
+    0;
 size_of(Func, V) ->
     S0 = #msrpce_state{mode = encode, aliasing = false, data = <<>>},
     S1 = Func(V, S0),

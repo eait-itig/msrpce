@@ -113,6 +113,12 @@ decode_abc(<<"abc", IntBin/binary>>) ->
     sz :: size_of(bin, ulong())
     }).
 
+-record(test12, {
+    data :: pointer(varying_array(uint16())),
+    sz :: size_of(data, ulong()),
+    len :: length_of(data, ulong())
+    }).
+
 -type user_session_key() :: msrpce:aligned_bin(16, 4).
 
 % MS-PAC section 2.2.1
@@ -245,6 +251,7 @@ decode_abc(<<"abc", IntBin/binary>>) ->
 -rpce_stream({pac_logon_info, [pac_info_buffer]}).
 
 -rpce_struct(test11).
+-rpce_struct(test12).
 
 test1_test() ->
     Struct = #test1{a = 1, b = 2, c = 3, d = 4},
@@ -402,6 +409,21 @@ test11_test() ->
     Data = encode_test11(Struct),
     ?assertMatch(<<16#00020000:32/little, 6:32/little,
         6:32/little, 0:32, 6:32/little, "abc123">>, Data).
+
+test12_test() ->
+    Struct = #test12{data = [1,2,3]},
+    Data = encode_test12(Struct),
+    ?assertMatch(<<16#00020000:32/little, 6:32/little, 3:32/little,
+        3:32/little, 1:16/little, 2:16/little, 3:16/little>>, Data),
+    DeStruct = decode_test12(Data),
+    ?assertMatch(#test12{data = [1,2,3], sz = 6, len = 3}, DeStruct).
+
+test12_null_test() ->
+    Struct = #test12{},
+    Data = encode_test12(Struct),
+    ?assertMatch(<<0:32/little, 0:32/little, 0:32/little>>, Data),
+    DeStruct = decode_test12(Data),
+    ?assertMatch(#test12{data = undefined, sz = 0, len = 0}, DeStruct).
 
 pac_test() ->
     WholePac = base64:decode(<<"
