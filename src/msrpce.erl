@@ -49,7 +49,7 @@
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
     pointer/1, str/0, varying_str/0, unicode/0, bin/0, fixed_bin/1,
-    varying_bin/0, aligned_bin/2, uuid/0
+    varying_bin/0, aligned_bin/2, uuid/0, varying_unicode/0
     ]).
 
 -include("include/records.hrl").
@@ -147,16 +147,19 @@
 %% a useful "escape hatch" for custom types.
 
 -type varying_bin() :: binary().
-%% A varying binary string, with no terminator.
+%% A varying binary string.
 
 -type str() :: string().
-%% A conformant-varying UTF8 string with a NUL terminator.
+%% A conformant-varying UTF8 string.
 
 -type varying_str() :: string().
-%% A varying UTF8 string with a NUL terminator.
+%% A varying UTF8 string.
 
 -type unicode() :: string().
-%% A conformant-varying UTF16-LE string with a NUL terminator.
+%% A conformant-varying UTF16-LE string.
+
+-type varying_unicode() :: string().
+%% A varying UTF16-LE string.
 
 -spec encode_sid(sid()) -> #msrpce_sid{}.
 encode_sid([Rev, IdAuth | SubAuths]) ->

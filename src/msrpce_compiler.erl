@@ -66,7 +66,7 @@
     {varying_array, rpce_type()} |
     {array, rpce_type()}.
 -type pointer_type() :: {pointer, rpce_type()}.
--type string_type() :: unicode |
+-type string_type() :: unicode | varying_unicode |
     string | {fixed_string, bytes()} | varying_string |
     binary | {fixed_binary, bytes()} | varying_binary |
     {fixed_binary, Size :: bytes(), Alignment :: bytes()}.
@@ -283,6 +283,7 @@ resolve_typerefs(T = {fixed_string, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _}, _) -> {ok, T};
 resolve_typerefs(T = {fixed_binary, _, _}, _) -> {ok, T};
 resolve_typerefs(unicode, _) -> {ok, unicode};
+resolve_typerefs(varying_unicode, _) -> {ok, varying_unicode};
 resolve_typerefs({length_of, Field, SubType0}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
         {ok, SubType1} -> {ok, {length_of, Field, SubType1}};
@@ -542,6 +543,7 @@ type_align(string) -> type_align(uint32);
 type_align(binary) -> type_align(uint32);
 type_align(varying_binary) -> type_align(uint32);
 type_align(varying_string) -> type_align(uint32);
+type_align(varying_unicode) -> type_align(uint32);
 type_align({fixed_string, _}) -> 1;
 type_align({fixed_binary, _}) -> 1;
 type_align({fixed_binary, _, A}) -> A;
@@ -785,7 +787,8 @@ encode_data({size_of, Field, Base}, SrcVar, S0 = #fstate{customs = C}) ->
             {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 4};
         T2 when (T2 =:= binary) or (T2 =:= string) or (T2 =:= unicode) ->
             {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 12};
-        T2 when (T2 =:= varying_binary) or (T2 =:= varying_string) ->
+        T2 when (T2 =:= varying_binary) or (T2 =:= varying_string) or
+                (T2 =:= varying_unicode) ->
             {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 4};
         _ ->
             {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 0}
@@ -867,21 +870,39 @@ encode_data(unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
     F2 = erl_syntax:binary_field(erl_syntax:integer(0),
         erl_syntax:integer(32), []),
     % actual count = string:length(Input)
-    F3 = erl_syntax:binary_field(erl_syntax:application(
-            erl_syntax:atom(string), erl_syntax:atom(length),
-            [SrcVar]),
+    F3 = erl_syntax:binary_field(LenExpr,
         erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
     % string data
     F4 = erl_syntax:binary_field(TVar, [erl_syntax:atom(binary)]),
-    % terminator
-    F5 = erl_syntax:binary_field(erl_syntax:integer(0),
-        erl_syntax:integer(16), []),
     OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4 + 4 + 4),
         erl_syntax:operator('+'),
         erl_syntax:infix_expr(LenExpr, erl_syntax:operator('*'),
             erl_syntax:integer(2))),
     S2 = add_forms([F0], S1),
-    add_encode_step(4, [F1, F2, F3, F4, F5], OffsetInc, S2);
+    add_encode_step(4, [F1, F2, F3, F4], OffsetInc, S2);
+encode_data(varying_unicode, SrcVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {TVar, S1} = inc_tvar(S0),
+    F0 = erl_syntax:match_expr(TVar,
+        erl_syntax:application(
+            erl_syntax:atom(unicode), erl_syntax:atom(characters_to_binary),
+            [SrcVar, erl_syntax:atom(utf8),
+             erl_syntax:tuple(
+                [erl_syntax:atom(utf16), erl_syntax:atom(little)])
+            ])),
+    LenExpr = erl_syntax:application(
+            erl_syntax:atom(string), erl_syntax:atom(length), [SrcVar]),
+    % actual count = string:length(Input)
+    F1 = erl_syntax:binary_field(LenExpr,
+        erl_syntax:integer(32), [erl_syntax:atom(Endian)]),
+    % string data
+    F2 = erl_syntax:binary_field(TVar, [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4),
+        erl_syntax:operator('+'),
+        erl_syntax:infix_expr(LenExpr, erl_syntax:operator('*'),
+            erl_syntax:integer(2))),
+    S2 = add_forms([F0], S1),
+    add_encode_step(4, [F1, F2], OffsetInc, S2);
 
 encode_data({fixed_binary, N, A}, SrcVar, S0 = #fstate{}) ->
     LenExpr = erl_syntax:application(erl_syntax:atom(byte_size), [SrcVar]),
@@ -1293,6 +1314,26 @@ decode_data(unicode, DstVar, S0 = #fstate{opts = Opts}) ->
             [SplitVar, erl_syntax:tuple([
                 erl_syntax:atom(utf16), erl_syntax:atom(little)])])),
     add_forms([Form0, Form1, Form2], S7);
+decode_data(varying_unicode, DstVar, S0 = #fstate{opts = Opts}) ->
+    Endian = maps:get(endian, Opts, big),
+    {RestVar, S1} = inc_tvar(S0),
+    {LenVar, S2} = inc_tvar(S1),
+    Field0 = erl_syntax:binary_field(LenVar, erl_syntax:integer(32),
+        [erl_syntax:atom(Endian)]),
+    Field1 = erl_syntax:binary_field(RestVar, erl_syntax:infix_expr(
+        LenVar, erl_syntax:operator('*'), erl_syntax:integer(2)),
+        [erl_syntax:atom(binary)]),
+    OffsetInc = erl_syntax:infix_expr(erl_syntax:integer(4),
+        erl_syntax:operator('+'), erl_syntax:infix_expr(
+            LenVar, erl_syntax:operator('*'), erl_syntax:integer(2))),
+    S3 = add_decode_step(4, [Field0, Field1], OffsetInc, S2),
+    Form0 = erl_syntax:match_expr(
+        DstVar,
+        erl_syntax:application(
+            erl_syntax:atom(unicode), erl_syntax:atom(characters_to_list),
+            [RestVar, erl_syntax:tuple([
+                erl_syntax:atom(utf16), erl_syntax:atom(little)])])),
+    add_forms([Form0], S3);
 
 decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= varying_string) or
                                                        (T =:= varying_binary) ->

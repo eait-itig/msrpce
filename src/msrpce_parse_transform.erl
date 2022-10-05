@@ -243,7 +243,8 @@ type_to_msrpce_type(Form) ->
                                                  (Primitive =:= int16) or
                                                  (Primitive =:= int32) or
                                                  (Primitive =:= int64) or
-                                                 (Primitive =:= unicode) ->
+                                                 (Primitive =:= unicode) or
+                                                 (Primitive =:= varying_unicode) ->
                             Primitive;
                         _ ->
                             error(unknown_type)

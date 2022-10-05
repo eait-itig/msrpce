@@ -65,6 +65,7 @@
 -type str() :: msrpce:str().
 -type varying_str() :: msrpce:varying_str().
 -type unicode() :: msrpce:unicode().
+-type varying_unicode() :: msrpce:varying_unicode().
 
 -type uuid() :: msrpce:uuid().
 
@@ -88,8 +89,10 @@
 -type word() :: msrpce:uint16().
 -type uchar() :: msrpce:uint8().
 
--type lpstr() :: pointer(string()).
+-type lpstr() :: pointer(str()).
 -type lpwstr() :: pointer(unicode()).
+
+-type wchar() :: msrpce:uint16().
 
 -type ntstatus() :: msrpce:builtin(
     msrpce:uint32(),
