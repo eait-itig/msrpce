@@ -198,7 +198,20 @@ ensure_structs([Struct | Rest], TOpts, S0 = #?MODULE{sgen = SG0}) ->
 %% @doc Returns the compiled forms.
 -spec func_forms(state()) -> [form()].
 func_forms(#?MODULE{funcs = F0}) ->
-    F0.
+    lists:flatten([unused_gag(F) || F <- F0]).
+
+unused_gag(Form) ->
+    case erl_syntax:type(Form) of
+        function ->
+            Name = erl_syntax:function_name(Form),
+            Arity = erl_syntax:function_arity(Form),
+            ArgsAbs = erl_syntax:abstract([{nowarn_unused_function,
+                [{erl_syntax:atom_value(Name), Arity}]}]),
+            AttrForm = erl_syntax:attribute(erl_syntax:atom(compile), [ArgsAbs]),
+            [Form, erl_syntax:revert(AttrForm)];
+        _ ->
+            [Form]
+    end.
 
 tpdedupe(PathTypes) -> tpdedupe(PathTypes, #{}).
 
@@ -722,7 +735,7 @@ encode_data({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
 
-encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
+encode_data({length_of, Field, Base}, SrcVar, S0 = #fstate{customs = C}) ->
     #fstate{ctx = Ctx0, unpacks = U} = S0,
     [{field, _ThisField} | Ctx1] = Ctx0,
     #{Ctx1 := FieldMap} = U,
@@ -732,15 +745,16 @@ encode_data({length_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
         _ -> RealVar0
     end,
     {TVar, S1} = inc_tvar(S0),
-    F = erl_syntax:match_expr(TVar,
+    F0 = erl_syntax:match_expr(erl_syntax:underscore(), SrcVar),
+    F1 = erl_syntax:match_expr(TVar,
         erl_syntax:case_expr(RealVar1,
             [erl_syntax:clause([erl_syntax:atom(undefined)], [],
                 [erl_syntax:integer(0)]),
              erl_syntax:clause([erl_syntax:underscore()], [],
                 [erl_syntax:application(erl_syntax:atom(length), [RealVar1])])])),
-    S2 = add_forms([F], S1),
+    S2 = add_forms([F0, F1], S1),
     encode_data(Base, TVar, S2);
-encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
+encode_data({size_of, Field, Base}, SrcVar, S0 = #fstate{customs = C}) ->
     #fstate{ctx = Ctx0, unpacks = U} = S0,
     [{field, _ThisField} | Ctx1] = Ctx0,
     #{Ctx1 := FieldMap} = U,
@@ -789,8 +803,9 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{customs = C}) ->
                     erl_syntax:infix_expr(Expr0, erl_syntax:operator('-'),
                         erl_syntax:integer(Subtract))])])
     end,
-    F = erl_syntax:match_expr(TVar, Expr1),
-    S2 = add_forms([F], S1),
+    F0 = erl_syntax:match_expr(erl_syntax:underscore(), SrcVar),
+    F1 = erl_syntax:match_expr(TVar, Expr1),
+    S2 = add_forms([F0, F1], S1),
     encode_data(Base, TVar, S2);
 
 encode_data(T, SrcVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
