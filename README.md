@@ -1,9 +1,14 @@
 msrpce
 =====
 
-An OTP library
+Erlang parser-generator for MS DCE RPC messages.
 
-Build
------
+Installing
+----------
 
-    $ rebar3 compile
+Available on [hex.pm](https://hex.pm/packages/msrpce)
+
+API docs
+--------
+
+[Edoc](https://hexdocs.pm/msrpce)

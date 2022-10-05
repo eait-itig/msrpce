@@ -1,0 +1,4 @@
+@doc A parser-generator for MS DCE RPC messages.
+
+See {@link msrpce_parse_transform} for details on how to use the parse
+transform to compile records into encoder and decoder functions.

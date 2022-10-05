@@ -18,3 +18,10 @@ _build
 rebar3.crashdump
 *~
 rebar.lock
+doc/edoc*
+doc/*.png
+doc/*.html
+doc/*.css
+doc/*.css.*
+doc/*.js
+doc/*.js.*
