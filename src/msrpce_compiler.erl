@@ -738,8 +738,14 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
     #{Ctx1 := FieldMap} = U,
     #{Field := {RealType, RealVar}} = FieldMap,
     Fun = case RealType of
-        {pointer, RefType} ->
-            case RefType of
+        {pointer, RefType0} ->
+            RefType1 = case RefType0 of
+                {custom, Base, _Enc, _Dec} -> Base;
+                {le, Base} -> Base;
+                {be, Base} -> Base;
+                Other -> Other
+            end,
+            case RefType1 of
                 {struct, RefStruct, _} ->
                     enc_fun(build_struct_path(push_struct(RefStruct, S0)));
                 _Other ->
