@@ -748,17 +748,32 @@ encode_data({size_of, Field, Base}, _SrcVar, S0 = #fstate{}) ->
         {be, Base} -> Base;
         Other -> Other
     end,
-    Fun = case RefType1 of
+    {Fun, Subtract} = case RefType1 of
         {struct, RefStruct, _} ->
-            enc_fun(build_struct_path(push_struct(RefStruct, S0)));
-        _Other ->
-            enc_fun(build_struct_path(S0) ++ ['_F', Field])
+            {enc_fun(build_struct_path(push_struct(RefStruct, S0))), 0};
+        {array, _T} ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 8};
+        {varying_array, _T} ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 4};
+        {conformant_array, _T} ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 4};
+        T2 when (T2 =:= binary) or (T2 =:= string) or (T2 =:= unicode) ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 12};
+        T2 when (T2 =:= varying_binary) or (T2 =:= varying_string) ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 4};
+        _ ->
+            {enc_fun(build_struct_path(S0) ++ ['_F', Field]), 0}
     end,
     {TVar, S1} = inc_tvar(S0),
-    F = erl_syntax:match_expr(TVar,
-        erl_syntax:application(
-            erl_syntax:atom(msrpce_runtime), erl_syntax:atom(size_of),
-            [Fun, RealVar])),
+    Expr0 = erl_syntax:application(
+        erl_syntax:atom(msrpce_runtime), erl_syntax:atom(size_of),
+        [Fun, RealVar]),
+    Expr1 = case Subtract of
+        0 -> Expr0;
+        _ -> erl_syntax:infix_expr(Expr0, erl_syntax:operator('-'),
+            erl_syntax:integer(Subtract))
+    end,
+    F = erl_syntax:match_expr(TVar, Expr1),
     S2 = add_forms([F], S1),
     encode_data(Base, TVar, S2);
 

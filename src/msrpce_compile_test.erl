@@ -101,6 +101,11 @@
     uvalues :: multi_unicode()
     }).
 
+-record(test11, {
+    bin :: pointer(binary()),
+    sz :: size_of(bin, ulong())
+    }).
+
 -type user_session_key() :: msrpce:aligned_bin(16, 4).
 
 % MS-PAC section 2.2.1
@@ -231,6 +236,8 @@
 
 -rpce(#{endian => little, pointer_aliasing => false}).
 -rpce_stream({pac_logon_info, [pac_info_buffer]}).
+
+-rpce_struct(test11).
 
 test1_test() ->
     Struct = #test1{a = 1, b = 2, c = 3, d = 4},
@@ -382,6 +389,12 @@ test10_test() ->
         11:32/big, 0:32, 11:32/big, 0, $t, 0, $e, 0, $s, 0, $t, 0, 0,
                                     0, $w, 0, $h, 0, $a, 0, $t, 0, 0,
                                     0, 0>>, Data).
+
+test11_test() ->
+    Struct = #test11{bin = <<"abc123">>},
+    Data = encode_test11(Struct),
+    ?assertMatch(<<16#00020000:32/little, 6:32/little,
+        6:32/little, 0:32, 6:32/little, "abc123">>, Data).
 
 pac_test() ->
     WholePac = base64:decode(<<"
