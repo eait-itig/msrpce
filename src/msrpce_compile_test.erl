@@ -233,7 +233,7 @@ decode_abc(<<"abc", IntBin/binary>>) ->
 
     resource_group_domain_sid   :: pointer(sid()),
     resource_group_count        :: ulong(),
-    resource_groups             :: pointer(array(#group_membership{}))
+    resource_groups             :: pointer(varying_array(#group_membership{}))
     }).
 
 -record(pac_info_buffer, {
@@ -312,7 +312,11 @@ test5_test() ->
 
 test5_offset_test() ->
     Data = <<5:32/big,1000:16/big,0:16,1:32,3:32/big,
-        10:16/big,1:16/big,2:16/big,3:16/big,50:16/big, 3>>,
+        10:16/big,1:16/big,2:16/big,3:16/big,
+        % this should have an extra 16-bit number here
+        % but the MS compiler seems to generate bogus maxlens sometimes
+        % so we ignore it :(
+        3>>,
     DeStruct = decode_test5(Data),
     ?assertMatch(#test5{as = [1,2,3], b = 1000}, DeStruct).
 
@@ -472,6 +476,38 @@ AAAAAAAAAHb///9B7c6aNIFdOu97yYh0gF0lAAAAAHb////3pTTassAphu/g++URCk8yAAAAAA==">>)
         user_flags = #{extra_sids := true},
         user_account_control = #{normal := true},
         user_id = 2914711
+        }, Info),
+    PacInfo2 = encode_pac_logon_info([#pac_info_buffer{info = Info}]),
+    ?assertMatch([#pac_info_buffer{info = Info}],
+        decode_pac_logon_info(PacInfo2)).
+
+pac_2_test() ->
+    PacInfo = base64:decode(<<"
+ARAIAMzMzMwABAAAAAAAAAAAAgBem1RX7c7YAf////////9//////////3+bV+2WWkLZAZtX7ZZa
+QtkB/////////38QABAABAACACAAIAAIAAIACgAKAAwAAgAAAAAAEAACAD4APgAUAAIABAAEABgA
+AgAOAAAAGUQAAAECAAA6AAAAHAACACACAAAAAAAAAAAAAAAAAAAAAAAACAAKACAAAgAIAAoAJAAC
+ACgAAgAAAAAAAAAAABACCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAACwAAgA0AAIA
+AQAAADgAAgAIAAAAAAAAAAgAAAB1AHEAYQB3AGkAbAAxADYAEAAAAAAAAAAQAAAAQQBsAGUAeABh
+AG4AZABlAHIAIABXAGkAbABzAG8AbgAFAAAAAAAAAAUAAABrAGkAeAAzADIAAAAAAAAAAAAAAAAA
+AAAfAAAAAAAAAB8AAABcAFwAcwBtAG8AawBlAC4AZQBhAGkAdAAuAHUAcQAuAGUAZAB1AC4AYQB1
+AFwAdQBxAGEAdwBpAGwAMQA2AAAAAgAAAAAAAAACAAAASAA6ADoAAABjkgAABwAAAMqRAAAHAAAA
+v5MAAAcAAABHhAAABwAAAFRiAAAHAAAAbX4AAAcAAABalQAABwAAAMCTAAAHAAAA2JIAAAcAAADj
+jwAABwAAAGuQAAAHAAAAIp8AAAcAAABikAAABwAAAOh9AAAHAAAA5I8AAAcAAAABAgAABwAAAKyB
+AAAHAAAAxIEAAAcAAABHWQAABwAAAAMkAAAHAAAAM5MAAAcAAADpfQAABwAAAIszAAAHAAAAmKUA
+AAcAAADojwAABwAAAEiEAAAHAAAA6X8AAAcAAADmjwAABwAAAEBZAAAHAAAARoQAAAcAAAAuNwAA
+BwAAAOGPAAAHAAAAtH0AAAcAAABMWQAABwAAAL6TAAAHAAAAR5IAAAcAAABVlQAABwAAAG6VAAAH
+AAAAlS0AAAcAAADljwAABwAAAOqPAAAHAAAAlpMAAAcAAABBWQAABwAAAOuPAAAHAAAAvJMAAAcA
+AADijwAABwAAAOePAAAHAAAA6Y8AAAcAAADnkQAABwAAAPerAAAHAAAAwiUAAAcAAABTYgAABwAA
+AJWTAAAHAAAAwZMAAAcAAACkkAAABwAAAENZAAAHAAAA0zEAAAcAAACWkAAABwAAAAUAAAAAAAAA
+BAAAAFAARQBBAFIABQAAAAAAAAAEAAAARQBBAEkAVAAEAAAAAQQAAAAAAAUVAAAAMqTjIfSXR/UP
+tcIlAQAAADAAAgAHAAAAAQAAAAEBAAAAAAASAQAAAAQAAAABBAAAAAAABRUAAAAypOMh9JdH9Q+1
+wiUBAAAAQC8AAAcAACA=">>),
+    [#pac_info_buffer{info = Info}] = decode_pac_logon_info(PacInfo),
+    ?assertMatch(#kerb_validation_info{
+        effective_name = "uqawil16",
+        user_flags = #{extra_sids := true},
+        user_account_control = #{normal := true},
+        user_id = 17433
         }, Info),
     PacInfo2 = encode_pac_logon_info([#pac_info_buffer{info = Info}]),
     ?assertMatch([#pac_info_buffer{info = Info}],

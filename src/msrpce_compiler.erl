@@ -530,14 +530,14 @@ build_enc_ectx(#fstate{ctx = Ctx}) ->
     end, Ctx),
     erl_syntax:tuple(lists:reverse(StepsRev)).
 -spec build_ectx(fstate()) -> expr().
-build_ectx(#fstate{ctx = Ctx, odn = ODN0}) ->
+build_ectx(#fstate{ctx = Ctx, odn = ODN0, sn = SN0}) ->
     StepsRev = lists:map(fun ({Type, Name}) ->
         erl_syntax:tuple([erl_syntax:atom(Type), erl_syntax:atom(Name)])
     end, Ctx),
     PathExpr = erl_syntax:tuple(lists:reverse(StepsRev)),
     erl_syntax:tuple([
         erl_syntax:atom(invalid_data),
-        ovar(ODN0), PathExpr]).
+        ovar(ODN0), svar(SN0), PathExpr]).
 
 -spec pad_size(bytes(), bytes()) -> bytes().
 pad_size(Size, Off) ->
@@ -1484,8 +1484,8 @@ decode_data({varying_array, _Type}, DstVar, S0 = #fstate{opts = Opts}) ->
 decode_data({array, _Type}, DstVar, S0 = #fstate{opts = Opts}) ->
     % max has already been hoisted out
     Endian = maps:get(endian, Opts, big),
-    #fstate{ctx = Ctx, maxlens = ML} = S0,
-    #{Ctx := MaxLenVar} = ML,
+    #fstate{ctx = Ctx} = S0, %maxlens = ML} = S0,
+    %#{Ctx := MaxLenVar} = ML,
     [{field, FName} | _] = Ctx,
     DecodeFun = dec_fun(build_struct_path(S0) ++ ['_A', FName]),
     {OffsetVar, S1} = inc_tvar(S0),
@@ -1500,12 +1500,25 @@ decode_data({array, _Type}, DstVar, S0 = #fstate{opts = Opts}) ->
         [erl_syntax:atom(Endian)]),
     S4 = add_decode_step(4, [Field0, Field1], 8, S3),
 
+    %
+    % The spec says that we should use the max len that was hoisted out here
+    % for the number of elements we should try to decode after the lengths.
+    %
+    % But MS' impl seems to get this wrong, and generates bogus data for maxlen
+    % on a regular basis.
+    %
+    % As a result, we just ignore it and use len + offset as the number to
+    % parse. :(
+    %
+    RealLenExpr = erl_syntax:infix_expr(LenVar, erl_syntax:operator('+'),
+        OffsetVar),
+
     {SV0, SV1, S5} = inc_svar(S4),
     Form0 = erl_syntax:match_expr(
         erl_syntax:tuple([UnsplitVar, SV1]),
         erl_syntax:application(
             erl_syntax:atom(msrpce_runtime), erl_syntax:atom(array_decode),
-            [MaxLenVar, DecodeFun, SV0])),
+            [RealLenExpr, DecodeFun, SV0])),
     StartExpr = erl_syntax:infix_expr(OffsetVar, erl_syntax:operator('+'),
         erl_syntax:integer(1)),
     Form1 = erl_syntax:match_expr(DstVar,
