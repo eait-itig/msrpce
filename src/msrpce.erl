@@ -221,6 +221,17 @@
 %% {@link msrpce:size_of()} and {@link msrpce:length_of()} can be used to
 %% automatically set it. It will still require a separate field in your record.
 %%
+%% <h3>Unions</h3>
+%%
+%% Discriminated unions can be specified using {@link msrpce:union()}, which
+%% takes an integer type (for the discriminator) and two maps.
+%%
+%% Unions are encoded as the discriminator immediately followed by the
+%% union arm selected.
+%%
+%% The first map converts integer discriminator values to atoms. The second
+%% map converts those atoms to actual types.
+%%
 %% <h3>Annotation types</h3>
 %%
 %% These types wrap another RPCE type and change its behaviour.
@@ -248,6 +259,11 @@
 %%    <td>{@link msrpce:length_of()}</td>
 %%    <td>Integer type (other field can be any array or string)</td>
 %%    <td>Replaces the value of the wrapped integer with the array length of another struct field</td>
+%%  </tr>
+%%  <tr>
+%%    <td>{@link msrpce:discrim_of()}</td>
+%%    <td>Integer type (other field must be a union)</td>
+%%    <td>Replaces the value of the wrapped integer with the value of the union discriminator for another struct field</td>
 %%  </tr>
 %%  <tr>
 %%    <td>{@link msrpce:bitset()}</td>
