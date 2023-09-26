@@ -1,6 +1,6 @@
 {application, msrpce,
  [{description, "Parser-generator for MS DCE RPC messages"},
-  {vsn, "0.1.1"},
+  {vsn, "0.2.0"},
   {registered, []},
   {applications,
    [kernel,

@@ -60,6 +60,9 @@
 -type size_of(F, T) :: msrpce:size_of(F, T).
 -type length_of(F, T) :: msrpce:length_of(F, T).
 
+-type discrim_of(F, T) :: msrpce:discrim_of(F, T).
+-type union(IT, VN, NR) :: msrpce:union(IT, VN, NR).
+
 -type bin() :: msrpce:bin().
 -type varying_bin() :: msrpce:varying_bin().
 -type str() :: msrpce:str().

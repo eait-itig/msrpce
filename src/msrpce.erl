@@ -340,7 +340,8 @@
     int8/0, int16/0, int32/0, int64/0,
     bitset/3, bitset_mask/3,
     bitset_bitmap/0, bitset_maskmap/0,
-    size_of/2, length_of/2
+    size_of/2, length_of/2, discrim_of/2,
+    union/3
     ]).
 -export_type([
     fixed_array/2, conformant_array/1, varying_array/1, array/1,
@@ -526,6 +527,21 @@
 -type length_of(_Field, IntType) :: IntType.
 %% An integer type which represents the array length of a sibling field in
 %% the same struct. It will be automatically calculated during encoding.
+
+-type discrim_of(_Field, IntType) :: IntType.
+%% An integer type which represents the discriminant of a sibling union field
+%% in the same struct. It will be automatically calculated during encoding.
+
+-type union(_IntType, _ValueNameMap, _NameRecordMap) :: {atom(), term()}.
+%% A discriminated union.
+%%
+%% The <code>ValueNameMap</code> is of the form
+%% <code>#{integer() => atom()}</code>. It changes the integer values of
+%% the discriminant into atoms.
+%%
+%% The <code>NameRecordMap</code> is of the form
+%% <code>#{atom() | default => T}</code> where <code>T</code> is any other
+%% valid rpce type.
 
 -type bin() :: binary().
 %% A conformant-varying binary string, with no terminator. Conformant string

@@ -126,6 +126,12 @@ decode_abc(<<"abc", IntBin/binary>>) ->
     len :: length_of(data, uint8())
     }).
 
+-record(test14, {
+    type :: discrim_of(value, uint32()),
+    value :: union(uint32(), #{1 => type_a, 2 => type_a, 3 => type_b},
+        #{type_a => #test12{}, type_b => #test13{}})
+    }).
+
 -type user_session_key() :: msrpce:aligned_bin(16, 4).
 
 % MS-PAC section 2.2.1
@@ -260,6 +266,8 @@ decode_abc(<<"abc", IntBin/binary>>) ->
 -rpce_struct(test11).
 -rpce_struct(test12).
 -rpce_struct(test13).
+
+-rpce_struct(test14).
 
 test1_test() ->
     Struct = #test1{a = 1, b = 2, c = 3, d = 4},
@@ -442,6 +450,15 @@ test13_test() ->
     Data = encode_test13(Struct),
     ?assertMatch(<<16#00020000:32/little, 10, 5, 0:16,
         5:32/little, $h, 0, $e, 0, $l, 0, $l, 0, $o, 0>>, Data).
+
+test14_test() ->
+    Struct = #test14{value = {type_a, #test12{data = [1,2,3]}}},
+    Data = encode_test14(Struct),
+    ?assertMatch(<<1:32/little, 1:32/little, 16#00020000:32/little,
+        6:32/little, 3:32/little,
+        3:32/little, 1:16/little, 2:16/little, 3:16/little>>, Data),
+    Struct2 = decode_test14(Data),
+    ?assertMatch(#test14{value = {type_a, #test12{data = [1,2,3]}}}, Struct2).
 
 pac_test() ->
     WholePac = base64:decode(<<"

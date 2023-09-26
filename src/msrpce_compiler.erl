@@ -40,6 +40,8 @@
     state/0, options/0, type_options/0, rpce_type/0, type_name/0
     ]).
 
+-compile([export_all]).
+
 -type loc() :: erl_syntax:annotation_or_location().
 %% A source location, used as an annotation to make sure compiler errors have
 %% a line number and filename.
@@ -75,11 +77,14 @@
 -type record_field() :: atom().
 
 -type rpce_type() :: basic_type() | struct_type() | bit_type() | 
-    custom_type() | endian_type() | size_type() | type_name().
+    custom_type() | endian_type() | size_type() | union_type() | type_name().
 %% The top-level intermediate representation of an RPCE type.
-
 -type size_type() :: {size_of, record_field(), int_type()} |
-    {length_of, record_field(), int_type()}.
+    {length_of, record_field(), int_type()} |
+    {discrim_of, record_field(), int_type()}.
+-type union_type() ::
+    {union, int_type(), #{integer() => atom()},
+        [{atom() | default, rpce_type()}]}.
 -type endian_type() :: {le, rpce_type()} | {be, rpce_type()}.
 -type custom_type() :: {custom, rpce_type(), expr(), expr()} |
     {builtin, rpce_type(), expr(), expr()}.
@@ -259,6 +264,8 @@ get_deferred_types({size_of, _Field, Base}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
 get_deferred_types({length_of, _Field, Base}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
+get_deferred_types({discrim_of, _Field, Base}, Path0, Name) ->
+    get_deferred_types(Base, Path0, Name);
 get_deferred_types({bitset, Base, _Bits}, Path0, Name) ->
     get_deferred_types(Base, Path0, Name);
 get_deferred_types({pointer, Type = {struct, RecName, Fields}}, Path0, _Name) ->
@@ -275,6 +282,12 @@ get_deferred_types({struct, RecName, Fields}, Path0, _Name) ->
     lists:foldl(fun ({FName, FType}, Acc) ->
         Acc ++ get_deferred_types(FType, Path1, FName)
     end, [], Fields);
+get_deferred_types({union, _Discrim, _ValMap, TypeMap}, Path0, Name) ->
+    lists:foldl(fun ({ArmName, SubType}, Acc) ->
+        Path2 = Path0 ++ [ArmName],
+        F0 = {Path0 ++ [{union_arm, Name, ArmName}], SubType},
+        Acc ++ [F0 | get_deferred_types(SubType, Path2, ArmName)]
+    end, [], TypeMap);
 get_deferred_types({fixed_array, _N, SubType}, Path0, Name) ->
     Path1 = Path0 ++ [{array_field, Name}],
     [{Path1, SubType} | get_deferred_types(SubType, Path0, Name)];
@@ -317,6 +330,11 @@ resolve_typerefs({length_of, Field, SubType0}, Idx) ->
 resolve_typerefs({size_of, Field, SubType0}, Idx) ->
     case resolve_typerefs(SubType0, Idx) of
         {ok, SubType1} -> {ok, {size_of, Field, SubType1}};
+        Err -> Err
+    end;
+resolve_typerefs({discrim_of, Field, SubType0}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} -> {ok, {discrim_of, Field, SubType1}};
         Err -> Err
     end;
 resolve_typerefs({bitset, SubType0, Map}, Idx) ->
@@ -368,6 +386,22 @@ resolve_typerefs({struct, RecName, [{Field, SubType0} | Rest]}, Idx) ->
             case resolve_typerefs({struct, RecName, Rest}, Idx) of
                 {ok, {struct, RecName, RestFields}} ->
                     {ok, {struct, RecName, [{Field, SubType1} | RestFields]}};
+                Err -> Err
+            end;
+        Err -> Err
+    end;
+resolve_typerefs({union, Discrim0, ValMap, []}, Idx) ->
+    case resolve_typerefs(Discrim0, Idx) of
+        {ok, Discrim1} ->
+            {ok, {union, Discrim1, ValMap, []}};
+        Err -> Err
+    end;
+resolve_typerefs({union, Discrim, ValMap, [{Atom, SubType0} | Rest]}, Idx) ->
+    case resolve_typerefs(SubType0, Idx) of
+        {ok, SubType1} ->
+            case resolve_typerefs({union, Discrim, ValMap, Rest}, Idx) of
+                {ok, {union, Discrim, ValMap, RestFields}} ->
+                    {ok, {union, Discrim, ValMap, [{Atom, SubType1} | RestFields]}};
                 Err -> Err
             end;
         Err -> Err
@@ -426,7 +460,7 @@ svar(N) -> var("State", N).
 -spec ovar(integer()) -> ovar().
 ovar(N) -> var("Offset", N).
 
--type fctx() :: [{struct, atom()} | {field, atom()}].
+-type fctx() :: [{struct, atom()} | {field, atom()} | {union_arm, atom()}].
 
 -record(fstate, {
     opts :: options(),
@@ -435,6 +469,7 @@ ovar(N) -> var("Offset", N).
     unpacks = #{} :: #{fctx() => #{atom() => var()}},
     maxlens = #{} :: #{fctx() => expr()},
     customs = #{} :: #{var() => var()},
+    unions = #{} :: #{var() => {var(), var()}},
     in_dblk = false :: boolean(),
     obase = unknown :: integer() | unknown,
     offset = 0 :: integer(),
@@ -505,6 +540,10 @@ cur_svar(S0 = #fstate{sn = I, in_dblk = false}) -> {svar(I), S0}.
 push_struct(Struct, S0 = #fstate{ctx = Ctx0}) ->
     Ctx1 = [{struct, Struct} | Ctx0],
     S0#fstate{ctx = Ctx1}.
+-spec push_union(atom(), fstate()) -> fstate().
+push_union(ArmName, S0 = #fstate{ctx = Ctx0}) ->
+    Ctx1 = [{union_arm, ArmName} | Ctx0],
+    S0#fstate{ctx = Ctx1}.
 -spec push_field(atom(), fstate()) -> fstate().
 push_field(Field, S0 = #fstate{ctx = Ctx0}) ->
     Ctx1 = [{field, Field} | Ctx0],
@@ -517,10 +556,15 @@ pop_struct(S0 = #fstate{ctx = Ctx0}) ->
 pop_field(S0 = #fstate{ctx = Ctx0}) ->
     [{field, _} | Ctx1] = Ctx0,
     S0#fstate{ctx = Ctx1}.
+-spec pop_union(fstate()) -> fstate().
+pop_union(S0 = #fstate{ctx = Ctx0}) ->
+    [{union_arm, _} | Ctx1] = Ctx0,
+    S0#fstate{ctx = Ctx1}.
 -spec build_struct_path(fstate()) -> type_path().
 build_struct_path(#fstate{ctx = Ctx}) ->
     lists:foldl(fun
         ({struct, Name}, Acc) -> [Name | Acc];
+        ({union_arm, Name}, Acc) -> [Name | Acc];
         ({field, _}, Acc) -> Acc
     end, [], Ctx).
 -spec build_enc_ectx(fstate()) -> expr().
@@ -557,6 +601,7 @@ type_align(int8) -> 1;
 type_align(int16) -> 2;
 type_align(int32) -> 4;
 type_align(int64) -> 8;
+type_align({union, T, _, _}) -> type_align(T);
 type_align({bitset, Base, _Map}) -> type_align(Base);
 type_align({custom, Base, _E, _D}) -> type_align(Base);
 type_align({fixed_array, _, T}) -> type_align(T);
@@ -574,6 +619,7 @@ type_align({fixed_binary, _}) -> 1;
 type_align({fixed_binary, _, A}) -> A;
 type_align({length_of, _, T}) -> type_align(T);
 type_align({size_of, _, T}) -> type_align(T);
+type_align({discrim_of, _, T}) -> type_align(T);
 type_align({le, T}) -> type_align(T);
 type_align({be, T}) -> type_align(T);
 type_align(unicode) -> type_align(uint32);
@@ -762,6 +808,15 @@ encode_data({be, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     S1 = encode_data(Base, SrcVar, S0#fstate{opts = Opts1}),
     S1#fstate{opts = Opts0};
 
+encode_data({discrim_of, Field, Base}, SrcVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0, unpacks = U, unions = UN} = S0,
+    [{field, _ThisField} | Ctx1] = Ctx0,
+    #{Ctx1 := FieldMap} = U,
+    #{Field := {_Type, RealVar}} = FieldMap,
+    #{RealVar := {TypeVar, TypeIntVar, _ValVar}} = UN,
+    F0 = erl_syntax:match_expr(erl_syntax:underscore(), SrcVar),
+    S1 = add_forms([F0], S0),
+    encode_data(Base, TypeIntVar, S1);
 encode_data({length_of, Field, Base}, SrcVar, S0 = #fstate{customs = C}) ->
     #fstate{ctx = Ctx0, unpacks = U} = S0,
     [{field, _ThisField} | Ctx1] = Ctx0,
@@ -1065,6 +1120,22 @@ encode_data(Type = {pointer, RefType}, SrcVar, S0 = #fstate{}) ->
              Fun, SrcVar, SV0])),
     add_forms([Form], 4, S2);
 
+encode_data({union, DiscrimType, ValMap, TypeMap}, SrcVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0, unions = U0} = S0,
+    [{field, F} | _] = Ctx0,
+    #{SrcVar := {TypeVar, TypeIntVar, ValVar}} = U0,
+    S1 = encode_data(DiscrimType, TypeIntVar, S0),
+    {SV0, SV1, S2} = inc_svar(S1),
+    Cases = lists:map(fun ({TypeAtom, _SubType}) ->
+        Fun = enc_fun_name(build_struct_path(S2) ++ ['_U', F, TypeAtom]),
+        erl_syntax:clause([erl_syntax:atom(TypeAtom)], [], [
+            erl_syntax:application(Fun, [ValVar, SV0])
+            ])
+    end, TypeMap),
+    F1 = erl_syntax:match_expr(SV1,
+        erl_syntax:case_expr(TypeVar, Cases)),
+    add_forms([F1], S2);
+
 encode_data(Type = {struct, Record, Fields}, _SrcVar, S0 = #fstate{}) ->
     Align = type_align(Type),
     S1 = push_struct(Record, S0),
@@ -1090,9 +1161,32 @@ encode_unpacks({custom, Base, Enc, _Dec}, SrcVar, S0 = #fstate{customs = C0}) ->
         erl_syntax:application(Enc, [SrcVar])),
     S3 = add_forms([Form], S2),
     encode_unpacks(Base, TVar, S3);
+encode_unpacks({union, _DT, ValMap, _TypeMap}, SrcVar, S0 = #fstate{unions = U0}) ->
+    {TypeVar, S1} = inc_tvar(S0),
+    {ValVar, S2} = inc_tvar(S1),
+    {TypeIntVar, S3} = inc_tvar(S2),
+    U1 = U0#{SrcVar => {TypeVar, TypeIntVar, ValVar}},
+    S4 = S3#fstate{unions = U1},
+    F0 = erl_syntax:match_expr(
+        erl_syntax:tuple([TypeVar, ValVar]), SrcVar),
+    InvValMap = maps:fold(fun (TypeInt, TypeAtom, Acc) ->
+        case Acc of
+            #{TypeAtom := OtherTypeInt} when (OtherTypeInt < TypeInt) -> Acc;
+            _ -> Acc#{TypeAtom => TypeInt}
+        end
+    end, #{}, ValMap),
+    ValCases = maps:fold(fun (TypeAtom, TypeInt, Acc) ->
+        [erl_syntax:clause([erl_syntax:atom(TypeAtom)], [], [
+            erl_syntax:integer(TypeInt)]) | Acc]
+    end, [], InvValMap),
+    F1 = erl_syntax:match_expr(TypeIntVar,
+        erl_syntax:case_expr(TypeVar, ValCases)),
+    add_forms([F0, F1], S4);
 encode_unpacks({size_of, _Field, _Base}, _SrcVar, S0 = #fstate{}) ->
     S0;
 encode_unpacks({length_of, _Field, _Base}, _SrcVar, S0 = #fstate{}) ->
+    S0;
+encode_unpacks({discrim_of, _Field, _Base}, _SrcVar, S0 = #fstate{}) ->
     S0;
 encode_unpacks({le, Base}, SrcVar, S0 = #fstate{opts = Opts0}) ->
     Opts1 = Opts0#{endian => little},
@@ -1183,6 +1277,11 @@ encode_struct_func_form(Path0, Type, Loc, Opts) ->
             [_ | C] = Ctx0,
             P = lists:droplast(Path0),
             {enc_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        {union_arm, FieldName, ArmName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {enc_fun_name(P ++ ['_U', FieldName, ArmName]),
+                [{union_arm, ArmName}, {field, FieldName} | C]};
         _ ->
             {struct, RecName, _} = Type,
             {enc_fun_name(Path0 ++ [RecName]), Ctx0}
@@ -1246,6 +1345,8 @@ decode_data({be, Base}, DstVar, S0 = #fstate{opts = Opts0}) ->
 decode_data({length_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
     decode_data(Base, DstVar, S0);
 decode_data({size_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_data(Base, DstVar, S0);
+decode_data({discrim_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
     decode_data(Base, DstVar, S0);
 
 decode_data(T, DstVar, S0 = #fstate{opts = Opts}) when (T =:= string) or
@@ -1549,6 +1650,28 @@ decode_data(Type = {pointer, RefType}, DstVar, S0 = #fstate{}) ->
              Fun, SV0])),
     add_forms([Form], 4, S2);
 
+decode_data({union, DiscrimType, ValMap, _TypeMap}, DstVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0} = S0,
+    [{field, F} | _] = Ctx0,
+    {TypeIntVar, S1} = inc_tvar(S0),
+    S2 = decode_data(DiscrimType, TypeIntVar, S1),
+    {SV0, SV1, S3} = inc_svar(S2),
+    {RetVar, S4} = inc_tvar(S3),
+    {StateRetVar, S5} = inc_tvar(S4),
+    Cases = maps:fold(fun (TypeInt, TypeAtom, Acc) ->
+        Fun = dec_fun_name(build_struct_path(S3) ++ ['_U', F, TypeAtom]),
+        F0 = erl_syntax:match_expr(erl_syntax:tuple([RetVar, StateRetVar]),
+            erl_syntax:application(Fun, [SV0])),
+        F1 = erl_syntax:tuple([
+            erl_syntax:tuple([erl_syntax:atom(TypeAtom), RetVar]),
+            StateRetVar]),
+        [erl_syntax:clause([erl_syntax:integer(TypeInt)], [], [F0, F1]) | Acc]
+    end, [], ValMap),
+    F0 = erl_syntax:match_expr(
+        erl_syntax:tuple([DstVar, SV1]),
+        erl_syntax:case_expr(TypeIntVar, Cases)),
+    add_forms([F0], S5);
+
 decode_data(Type = {struct, Record, Fields}, _DstVar, S0 = #fstate{}) ->
     Align = type_align(Type),
     S1 = push_struct(Record, S0),
@@ -1610,6 +1733,8 @@ decode_hoists({size_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
     decode_hoists(Base, DstVar, S0);
 decode_hoists({length_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
     decode_hoists(Base, DstVar, S0);
+decode_hoists({discrim_of, _Field, Base}, DstVar, S0 = #fstate{}) ->
+    decode_hoists(Base, DstVar, S0);
 decode_hoists({bitset, _Base, _Map}, _DstVar, S0 = #fstate{}) ->
     S0;
 decode_hoists(PrimType, _DstVar, S0 = #fstate{}) when is_atom(PrimType) ->
@@ -1619,6 +1744,8 @@ decode_hoists({fixed_string, _N}, _DstVar, S0 = #fstate{}) ->
 decode_hoists({fixed_binary, _N}, _DstVar, S0 = #fstate{}) ->
     S0;
 decode_hoists({fixed_binary, _N, _A}, _DstVar, S0 = #fstate{}) ->
+    S0;
+decode_hoists({union, _DT, _ValMap, _TypeMap}, _DstVar, S0 = #fstate{}) ->
     S0;
 decode_hoists({conformant_array, _Type}, _DstVar, S0 = #fstate{opts = Opts}) ->
     Endian = maps:get(endian, Opts, big),
@@ -1677,6 +1804,8 @@ decode_finish({be, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
 decode_finish({size_of, _Field, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
     decode_finish(Base, SrcVar, DstVar, S0);
 decode_finish({length_of, _Field, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
+    decode_finish(Base, SrcVar, DstVar, S0);
+decode_finish({discrim_of, _Field, Base}, SrcVar, DstVar, S0 = #fstate{}) ->
     decode_finish(Base, SrcVar, DstVar, S0);
 
 decode_finish({ArrType, _MembType}, SrcVar, DstVar, S0 = #fstate{})
@@ -1747,6 +1876,22 @@ decode_finish({struct, Record, Fields}, SrcVar, DstVar, S0 = #fstate{}) ->
     S5 = add_forms([PackForm], S4),
     pop_struct(S5);
 
+decode_finish({union, _D, _ValMap, TypeMap}, SrcVar, DstVar, S0 = #fstate{}) ->
+    #fstate{ctx = Ctx0} = S0,
+    [{field, F} | _] = Ctx0,
+    {TVar, S1} = inc_tvar(S0),
+    {SV, _} = cur_svar(S1),
+    Cases = lists:foldl(fun ({TypeAtom, _SubType}, Acc) ->
+        Fun = finish_fun_name(build_struct_path(S1) ++ ['_U', F, TypeAtom]),
+        [erl_syntax:clause([erl_syntax:tuple([
+            erl_syntax:atom(TypeAtom), TVar])], [],
+            [erl_syntax:tuple([erl_syntax:atom(TypeAtom),
+                erl_syntax:application(Fun, [TVar, SV])])]) | Acc]
+    end, [], TypeMap),
+    F0 = erl_syntax:match_expr(DstVar,
+        erl_syntax:case_expr(SrcVar, Cases)),
+    add_forms([F0], S1);
+
 decode_finish(_Type, SrcVar, DstVar, S0 = #fstate{}) ->
     Form = erl_syntax:match_expr(DstVar, SrcVar),
     add_forms([Form], S0).
@@ -1768,6 +1913,11 @@ decode_struct_func_form(Path0, Type, Loc, Opts) ->
             [_ | C] = Ctx0,
             P = lists:droplast(Path0),
             {dec_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        {union_arm, FieldName, ArmName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {dec_fun_name(P ++ ['_U', FieldName, ArmName]),
+                [{union_arm, ArmName}, {field, FieldName} | C]};
         _ ->
             {struct, RecName, _} = Type,
             {dec_fun_name(Path0 ++ [RecName]), Ctx0}
@@ -1805,6 +1955,11 @@ decode_finish_func_form(Path0, Type, Loc, Opts) ->
             [_ | C] = Ctx0,
             P = lists:droplast(Path0),
             {finish_fun_name(P ++ ['_A', FieldName]), [{field, FieldName} | C]};
+        {union_arm, FieldName, ArmName} ->
+            [_ | C] = Ctx0,
+            P = lists:droplast(Path0),
+            {finish_fun_name(P ++ ['_U', FieldName, ArmName]),
+                [{union_arm, ArmName}, {field, FieldName} | C]};
         _ ->
             {struct, RecName, _} = Type,
             {finish_fun_name(Path0 ++ [RecName]), Ctx0}

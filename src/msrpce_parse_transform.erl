@@ -127,9 +127,9 @@ transform(attribute, Form, S0 = #?MODULE{}) ->
     end;
 transform(eof_marker, Form, S0 = #?MODULE{compiler = C0}) ->
     FuncForms = msrpce_compiler:func_forms(C0),
-    %lists:foreach(fun (FForm) ->
-    %  io:format("~s\n", [erl_pp:form(FForm)])
-    %end, lists:reverse(FuncForms)),
+    % lists:foreach(fun (FForm) ->
+    %   io:format("~s\n", [erl_pp:form(FForm)])
+    % end, lists:reverse(FuncForms)),
     {FuncForms ++ [Form], S0};
 transform(_Type, Form, S0) ->
     {[Form], S0}.
@@ -174,8 +174,29 @@ type_to_msrpce_type(Form) ->
                         erl_syntax:user_type_application_arguments(Form),
                     {fixed_array, erl_syntax:integer_value(N),
                         type_to_msrpce_type(RefType)};
+                union ->
+                    [IntType, ValMapType, TypeMapType] =
+                        erl_syntax:user_type_application_arguments(Form),
+                    ValMapFields = erl_syntax:map_type_fields(ValMapType),
+                    ValMap = lists:foldl(fun (X, Acc) ->
+                        Key = erl_syntax:integer_value(
+                            erl_syntax:map_type_assoc_name(X)),
+                        Value = erl_syntax:atom_value(
+                            erl_syntax:map_type_assoc_value(X)),
+                        Acc#{Key => Value}
+                    end, #{}, ValMapFields),
+                    TypeMapFields = erl_syntax:map_type_fields(TypeMapType),
+                    TypeMap = lists:foldl(fun (X, Acc) ->
+                        Key = erl_syntax:atom_value(
+                            erl_syntax:map_type_assoc_name(X)),
+                        Value = type_to_msrpce_type(
+                            erl_syntax:map_type_assoc_value(X)),
+                        Acc ++ [{Key, Value}]
+                    end, [], TypeMapFields),
+                    {union, type_to_msrpce_type(IntType), ValMap, TypeMap};
                 ReferenceType when (ReferenceType =:= size_of) or
-                                   (ReferenceType =:= length_of) ->
+                                   (ReferenceType =:= length_of) or
+                                   (ReferenceType =:= discrim_of) ->
                     [Field, RefType] =
                         erl_syntax:user_type_application_arguments(Form),
                     {ReferenceType, erl_syntax:atom_value(Field),
@@ -216,7 +237,8 @@ type_to_msrpce_type(Form) ->
                                 type_to_msrpce_type(RefType)};
 
                         {msrpce, RType} when (RType =:= length_of) or
-                                             (RType =:= size_of) ->
+                                             (RType =:= size_of) or
+                                             (RType =:= discrim_of) ->
                             [Field, RefType] =
                                 erl_syntax:type_application_arguments(Form),
                             {RType, erl_syntax:atom_value(Field),
@@ -287,6 +309,30 @@ type_to_msrpce_type(Form) ->
                             DecQ = erl_syntax:module_qualifier(
                                 erl_syntax:atom(msrpce), Dec),
                             {custom, type_to_msrpce_type(BaseType), EncQ, DecQ};
+
+                        {msrpce, union} ->
+                            [IntType, ValMapType, TypeMapType] =
+                                erl_syntax:type_application_arguments(Form),
+                            ValMapFields = erl_syntax:map_type_fields(
+                                ValMapType),
+                            ValMap = lists:foldl(fun (X, Acc) ->
+                                Key = erl_syntax:integer_value(
+                                    erl_syntax:map_type_assoc_name(X)),
+                                Value = erl_syntax:atom_value(
+                                    erl_syntax:map_type_assoc_value(X)),
+                                Acc#{Key => Value}
+                            end, #{}, ValMapFields),
+                            TypeMapFields = erl_syntax:map_type_fields(
+                                TypeMapType),
+                            TypeMap = lists:foldl(fun (X, Acc) ->
+                                Key = erl_syntax:atom_value(
+                                    erl_syntax:map_type_assoc_name(X)),
+                                Value = type_to_msrpce_type(
+                                    erl_syntax:map_type_assoc_value(X)),
+                                Acc ++ [{Key, Value}]
+                            end, [], TypeMapFields),
+                            {union, type_to_msrpce_type(IntType), ValMap,
+                                TypeMap};
 
                         {msrpce, Primitive} when (Primitive =:= uint8) or
                                                  (Primitive =:= boolean) or
